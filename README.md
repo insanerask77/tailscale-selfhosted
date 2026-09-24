@@ -221,6 +221,36 @@ Manager (`REVERSE-PROXY.md`). Cópialos a la máquina del proxy.
 > **sin cifrar**. Restringe el acceso por firewall a la IP del proxy
 > (el instalador la pide como `PROXY_CIDR`).
 
+#### ¿Y encadenar Caddy en local sin TLS, detrás del proxy externo?
+
+Es decir: Caddy escuchando HTTP en la máquina de Headscale, haciendo el
+enrutado por ruta, y NPM delante poniendo el TLS. Es un patrón válido
+(proxy de borde + router interno), pero **no es el modo predeterminado a
+propósito**, porque en este stack aporta poco y cuesta más de lo que parece:
+
+- **No simplifica NPM.** Los dos ajustes críticos son de la primera capa:
+  *Websockets Support* (si NPM no pasa el `Upgrade`, `/ts2021` muere antes de
+  llegar a Caddy) y `proxy_read_timeout 3600s` + `proxy_buffering off` (si NPM
+  corta a los 60 s, `/machine/map` se reconecta en bucle aunque Caddy esté
+  perfecto). El Proxy Host nunca llega a ser un pass-through tonto; lo único
+  que te ahorras es el `location /admin`.
+- **Complica la IP real del cliente.** Con dos proxies, `trusted_proxies` de
+  Headscale pasa a ser el CIDR de la red Docker (`172.18.0.0/16`, mucho más
+  amplio que `<ip-del-proxy>/32`) y además Caddy necesita su propio
+  `trusted_proxies` apuntando a NPM. Es un sitio más donde la IP real sale
+  mal, y ese fallo es silencioso: los nodos simplemente aparecen todos con la
+  misma IP en los logs.
+- **No gana seguridad.** El salto NPM → Caddy va en claro igual que iría
+  NPM → Headscale.
+- **No ayuda con DERP.** El UDP 3478 sigue teniendo que ir directo.
+
+Lo único que sí aporta es exponer **un solo puerto** en la máquina del backend
+en lugar de dos, y dejar el enrutado por ruta versionado en el `Caddyfile` en
+vez de en la UI de NPM. Si eso te compensa, no hace falta un modo nuevo: parte
+de `proxy-single` y ajusta a mano el `Caddyfile` (`auto_https off`, sitio
+`:80`), el `docker-compose.override.yml` (publica sólo el puerto de Caddy) y
+los dos `trusted_proxies`.
+
 ### Variables de Entorno Principales
 
 El archivo `.env` (generado por `install.sh`) contiene todas las configuraciones:
