@@ -993,7 +993,7 @@ Hecho con ❤️ para la comunidad open-source
 
 
 #### TEST Container
-```docker run -it --rm \
+`docker run -it --rm \
   --name=tailscaled \
   -v /dev/net/tun:/dev/net/tun \
   --network=host \
@@ -1001,4 +1001,4 @@ Hecho con ❤️ para la comunidad open-source
   --cap-add=NET_RAW \
   --entrypoint /bin/sh \
   tailscale/tailscale \
-  -c 'tailscaled > /dev/null 2>&1 & exec /bin/sh'```
+  -c 'tailscaled > /dev/null 2>&1 & exec /bin/sh'` 
