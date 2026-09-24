@@ -604,8 +604,14 @@ EOFC
     fi
 
     # Cargar plantilla y sustituir variables
-    export COOKIE_SECRET SESSION_SECURE SERVER_URL HEADSCALE_HTTP_PORT OIDC_CONFIG_BLOCK
+    # Exportar todas las variables necesarias
+    export COOKIE_SECRET
+    export SESSION_SECURE
+    export SERVER_URL
+    export HEADSCALE_HTTP_PORT
+    export OIDC_CONFIG_BLOCK
 
+    # Usar envsubst sin lista de variables para que sustituya todas
     envsubst < "$TEMPLATES_DIR/headplane-config.yaml.tmpl" > "$SCRIPT_DIR/headplane-config.yaml"
 
     print_success "Configuración de Headplane generada: headplane-config.yaml"
