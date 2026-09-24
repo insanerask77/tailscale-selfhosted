@@ -11,6 +11,9 @@ headscale-config.yaml
 headplane-config.yaml
 Caddyfile
 
+# CA raíz exportada de Caddy (SSL_MODE=selfsigned)
+caddy-root-ca.crt
+
 # Logs
 *.log
 

@@ -924,6 +924,39 @@ deploy_stack() {
     else
         print_success "Servicios desplegados correctamente"
     fi
+
+    export_root_ca
+}
+
+# Con SSL_MODE=selfsigned, Caddy firma con su propia CA interna. Los clientes
+# Tailscale rechazan ese certificado ("x509: certificate signed by unknown
+# authority") y ni siquiera llegan a /key, así que la VPN no funciona hasta que
+# la CA se instala en cada dispositivo. Se exporta aquí para poder distribuirla.
+export_root_ca() {
+    [[ "${SSL_MODE:-none}" == "selfsigned" ]] || return 0
+
+    local ca_src="/data/caddy/pki/authorities/local/root.crt"
+    local ca_dst="${SCRIPT_DIR}/caddy-root-ca.crt"
+    local waited=0
+
+    while [ $waited -lt 30 ]; do
+        if docker exec caddy test -f "$ca_src" 2>/dev/null; then
+            if docker exec caddy cat "$ca_src" > "$ca_dst" 2>/dev/null \
+               && [[ -s "$ca_dst" ]]; then
+                chmod 644 "$ca_dst"
+                print_success "CA raíz exportada a: ${ca_dst}"
+                return 0
+            fi
+        fi
+        sleep 2
+        waited=$((waited + 2))
+    done
+
+    rm -f "$ca_dst"
+    print_warning "No se pudo exportar la CA raíz de Caddy"
+    print_info "Extráela manualmente con:"
+    print_info "  docker exec caddy cat ${ca_src} > caddy-root-ca.crt"
+    return 0
 }
 
 show_access_info() {
@@ -940,9 +973,25 @@ show_access_info() {
 
     if [[ "$ENABLE_SSL" == "true" ]]; then
         if [[ "$SSL_MODE" == "selfsigned" ]]; then
-            print_warning "Estás usando un certificado autofirmado"
-            print_warning "Tu navegador mostrará una advertencia de seguridad"
-            print_warning "Esto es normal, puedes proceder de forma segura en una red privada"
+            print_warning "Estás usando un certificado autofirmado (CA interna de Caddy)"
+            echo ""
+            echo -e "   ${BOLD}Los clientes Tailscale NO se conectarán hasta que instales la CA.${NC}"
+            echo -e "   Sin ella fallan con: ${YELLOW}x509: certificate signed by unknown authority${NC}"
+            echo ""
+            if [[ -s "${SCRIPT_DIR}/caddy-root-ca.crt" ]]; then
+                echo -e "   CA raíz exportada en: ${BOLD}${SCRIPT_DIR}/caddy-root-ca.crt${NC}"
+                echo -e "   Cópiala a cada dispositivo e instálala en su almacén de confianza:"
+                echo ""
+                echo -e "   ${YELLOW}# Linux (Debian/Ubuntu)${NC}"
+                echo -e "   ${YELLOW}sudo cp caddy-root-ca.crt /usr/local/share/ca-certificates/ && sudo update-ca-certificates${NC}"
+                echo -e "   ${YELLOW}# macOS${NC}"
+                echo -e "   ${YELLOW}sudo security add-trusted-cert -d -k /Library/Keychains/System.keychain caddy-root-ca.crt${NC}"
+                echo -e "   ${YELLOW}# Windows (PowerShell como administrador)${NC}"
+                echo -e "   ${YELLOW}Import-Certificate -FilePath caddy-root-ca.crt -CertStoreLocation Cert:\\LocalMachine\\Root${NC}"
+                echo ""
+                echo -e "   ${BOLD}Android/iOS no admiten CAs propias para Tailscale:${NC} en esos"
+                echo -e "   dispositivos necesitas Let's Encrypt (reejecuta el instalador)."
+            fi
             echo ""
         fi
     else

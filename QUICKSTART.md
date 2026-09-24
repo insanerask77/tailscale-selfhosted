@@ -170,6 +170,23 @@ docker compose ps  # Verifica que estén "healthy"
 ./install.sh  # Re-ejecutar y elegir "autofirmado"
 ```
 
+### `tailscale up` falla con `x509: certificate signed by unknown authority`
+
+**Causa**: estás usando certificado autofirmado y el cliente Tailscale no
+confía en la CA interna de Caddy. A diferencia del navegador, aquí no se puede
+"aceptar el riesgo": no conecta.
+
+**Solución**: instala `./caddy-root-ca.crt` (lo exporta el instalador) en el
+dispositivo:
+
+```bash
+sudo cp caddy-root-ca.crt /usr/local/share/ca-certificates/
+sudo update-ca-certificates
+```
+
+En móviles no es posible: usa Let's Encrypt. Ver
+[README.md](README.md#certificado-autofirmado-hay-que-instalar-la-ca-en-cada-cliente).
+
 ### Error 500 `auth ID has invalid length: expected 38, got 101`
 
 **Causa**: has pegado la **API key** (la del login, `hskey-api-…`, 87 caracteres)

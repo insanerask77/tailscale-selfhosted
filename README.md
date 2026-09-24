@@ -234,6 +234,41 @@ momento de crearla.
    tailscale up --login-server=https://vpn.midominio.com --authkey=<tu-clave>
    ```
 
+### Certificado autofirmado: hay que instalar la CA en cada cliente
+
+Con `SSL_MODE=selfsigned`, Caddy firma con su CA interna. El navegador solo
+muestra un aviso que puedes saltarte, pero **el cliente Tailscale directamente
+se niega a conectar**:
+
+```
+Received error: fetch control key: Get "https://vpn.midominio.com/key?v=142":
+x509: certificate signed by unknown authority
+```
+
+El instalador exporta la CA raíz a `./caddy-root-ca.crt`. Instálala en el
+almacén de confianza de cada dispositivo **antes** de `tailscale up`:
+
+```bash
+# Linux (Debian/Ubuntu)
+sudo cp caddy-root-ca.crt /usr/local/share/ca-certificates/ && sudo update-ca-certificates
+
+# macOS
+sudo security add-trusted-cert -d -k /Library/Keychains/System.keychain caddy-root-ca.crt
+
+# Windows (PowerShell como administrador)
+Import-Certificate -FilePath caddy-root-ca.crt -CertStoreLocation Cert:\LocalMachine\Root
+```
+
+Si la pierdes:
+
+```bash
+docker exec caddy cat /data/caddy/pki/authorities/local/root.crt > caddy-root-ca.crt
+```
+
+> ⚠️ Android e iOS no permiten que Tailscale use CAs propias. Para móviles
+> necesitas **Let's Encrypt** (`SSL_MODE=letsencrypt`), que no requiere instalar
+> nada en el cliente.
+
 ### Las tres claves del stack (no las confundas)
 
 Los tres tipos de clave empiezan por `hskey-` y es fácil pegar la que no toca.
