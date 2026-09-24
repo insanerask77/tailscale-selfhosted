@@ -160,11 +160,14 @@ services:
     networks:
       - headscale-net
 
-    ports:
-      - "${HTTP_PORT:-80}:80"
-      - "${HTTPS_PORT:-443}:443"
-      # Puerto HTTP/3 (QUIC)
-      - "${HTTPS_PORT:-443}:443/udp"
+    # Los puertos los publica docker-compose.override.yml, que genera
+    # install.sh: con SSL_MODE=none Caddy sólo escucha en HTTP y publicar 443
+    # ocuparía el puerto para nada. Compose fusiona las listas de 'ports'
+    # añadiendo, nunca quitando, así que no se pueden declarar aquí.
+    # ports:
+    #   - "${HTTP_PORT:-80}:80"
+    #   - "${HTTPS_PORT:-443}:443"
+    #   - "${HTTPS_PORT:-443}:443/udp"
 
     environment:
       - TZ=${TZ:-UTC}

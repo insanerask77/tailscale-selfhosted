@@ -16,7 +16,7 @@ La primera pregunta es el **modo de despliegue** y condiciona todas las demás:
 
 | Modo | Elígelo si... |
 |------|---------------|
-| **`standalone`** | Es una sola máquina y no tienes nada delante. Caddy saca el certificado solo. **Empieza por aquí.** |
+| **`standalone`** | Es una sola máquina y no tienes nada delante. Caddy enruta `/` y `/admin`, y saca el certificado solo (o ninguno, si no lo quieres). **Empieza por aquí.** |
 | **`proxy-single`** | Ya tienes Nginx Proxy Manager / Traefik y quieres un único dominio. |
 | **`proxy-split`** | Quieres `ts.midominio.com` para el control plane y `admin.midominio.com` para la UI. |
 | **`plain`** | Sólo LAN o desarrollo, sin cifrado. |
@@ -24,8 +24,15 @@ La primera pregunta es el **modo de despliegue** y condiciona todas las demás:
 Después:
 
 - **Dominio(s)**: `vpn.midominio.com`, o los dos dominios si elegiste `proxy-split`
-- **Certificado** (sólo en `standalone`): Let's Encrypt (necesita DNS público
-  ya apuntando aquí) o autofirmado
+- **Certificado** (sólo en `standalone`), tres opciones:
+  - *Let's Encrypt* — necesita un dominio con DNS público ya apuntando aquí y
+    los puertos 80/443 abiertos. `https://vpn.midominio.com` para todo, con la
+    UI en `/admin`.
+  - *Autofirmado* — HTTPS sin dependencias, pero hay que instalar la CA de
+    Caddy en cada cliente Tailscale o no conectarán.
+  - *Ninguno* — Caddy sigue arrancando y enrutando `/` → Headscale y `/admin`
+    → Headplane, pero por HTTP: `http://localhost`, `http://192.168.1.10`…
+    Para pruebas, LAN de confianza o acceso que ya va por otra VPN.
 - **Acceso desde el proxy** (sólo en los modos `proxy-*`): interfaz donde
   publicar los puertos, CIDR del proxy y la IP de esta máquina vista por él
 - **Puertos**: Enter para los valores por defecto
@@ -68,6 +75,7 @@ muestra por pantalla al terminar. Ábre la UI y pega esa key en el login:
 ```
 https://vpn.midominio.com/admin          # standalone / proxy-single
 https://admin.midominio.com/admin        # proxy-split
+http://localhost/admin                   # standalone sin certificado
 http://vpn.midominio.com:3000/admin      # plain
 ```
 
@@ -100,6 +108,9 @@ En tu ordenador/móvil con [Tailscale instalado](https://tailscale.com/download)
 ```bash
 # Con TLS (standalone o proxy-*): el control plane vive en la raíz del dominio
 tailscale up --login-server=https://ts.midominio.com --authkey=<tu-clave>
+
+# standalone sin certificado: igual, pero por HTTP y sin puerto (lo sirve Caddy)
+tailscale up --login-server=http://vpn.midominio.com --authkey=<tu-clave>
 
 # Modo plain: hay que indicar el puerto de Headscale
 tailscale up --login-server=http://vpn.midominio.com:8080 --authkey=<tu-clave>

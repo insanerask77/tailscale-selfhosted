@@ -134,8 +134,10 @@ cd tailscale-selfhosted
 ```
 
 El instalador te preguntará:
+- Modo de despliegue (ver [Modos de despliegue](#modos-de-despliegue))
 - Dominio o IP de acceso
-- ¿Habilitar SSL? (con Let's Encrypt o certificado autofirmado)
+- Qué certificado usar: Let's Encrypt, autofirmado o **ninguno** (Caddy sigue
+  enrutando, pero por HTTP)
 - Puertos a usar (con defaults razonables)
 - Nombre de tu organización/tailnet
 - ¿Integrar OIDC? (opcional)
@@ -178,7 +180,7 @@ TLS, si arranca Caddy y cuántos dominios hacen falta:
 
 | Modo | Quién termina TLS | Dominios | Caddy | Cuándo usarlo |
 |------|-------------------|----------|-------|---------------|
-| **`standalone`** | Caddy, en esta máquina | 1 | ✅ arranca | Una sola máquina, sin nada delante. Lo más simple. |
+| **`standalone`** | Caddy, en esta máquina (o nadie) | 1 | ✅ arranca | Una sola máquina, sin nada delante. Lo más simple. |
 | **`proxy-single`** | Proxy externo | 1 | ❌ | Ya tienes NPM/Traefik y quieres un único dominio. |
 | **`proxy-split`** | Proxy externo | 2 | ❌ | Control plane y UI en dominios distintos. |
 | **`plain`** | Nadie (HTTP) | 1 | ❌ | LAN de confianza y desarrollo. |
@@ -193,6 +195,27 @@ en el proxy.
 cliente ──HTTPS──▶ Caddy ─┬─▶ /       Headscale
                           └─▶ /admin  Headplane
 ```
+
+Dentro de `standalone` el certificado es una segunda pregunta, y **una de las
+respuestas es "ninguno"**: Caddy arranca igual y sigue enrutando `/` y
+`/admin`, sólo que por HTTP.
+
+| `SSL_MODE` | Esquema | Qué hace Caddy | Puertos publicados |
+|---|---|---|---|
+| `letsencrypt` | `https://` | Pide el certificado del dominio a Let's Encrypt y redirige HTTP → HTTPS | 80, 443, 443/udp |
+| `selfsigned` | `https://` | Firma con su CA interna (`tls internal`); hay que instalar la CA en cada cliente | 80, 443, 443/udp |
+| `none` | `http://` | Sólo reverse proxy, sin cifrar ni redirección | 80 |
+
+`SSL_MODE=none` es la opción para `http://localhost`, una IP de LAN o un
+acceso que ya viaja por una VPN. Su `Caddyfile` usa el site address `:80` en
+vez del dominio, así que responde a **cualquier** `Host` (localhost, la IP,
+un hostname interno); una dirección sin esquema ni host tampoco dispara la
+emisión automática de certificados, por lo que no hace falta `auto_https off`.
+El instalador ni siquiera ofrece Let's Encrypt si `DOMAIN` es una IP o
+`localhost`, porque el reto ACME no puede completarse para eso.
+
+> ⚠️ Sin TLS el plano de control viaja en claro, incluidas las pre-auth keys
+> y la API key de Headplane. Úsalo sólo en una red de confianza.
 
 **`proxy-single`** — un dominio, proxy en otra máquina:
 
@@ -247,9 +270,11 @@ propósito**, porque en este stack aporta poco y cuesta más de lo que parece:
 Lo único que sí aporta es exponer **un solo puerto** en la máquina del backend
 en lugar de dos, y dejar el enrutado por ruta versionado en el `Caddyfile` en
 vez de en la UI de NPM. Si eso te compensa, no hace falta un modo nuevo: parte
-de `proxy-single` y ajusta a mano el `Caddyfile` (`auto_https off`, sitio
-`:80`), el `docker-compose.override.yml` (publica sólo el puerto de Caddy) y
-los dos `trusted_proxies`.
+de **`standalone` con `SSL_MODE=none`**: eso ya te deja el `Caddyfile` con
+sitio `:80` y un `docker-compose.override.yml` que publica sólo el puerto de
+Caddy. Lo que queda por tu cuenta es apuntar NPM a ese puerto y ajustar los
+dos `trusted_proxies` (el de Caddy, hacia NPM, y el de Headscale, hacia la red
+Docker).
 
 ### Variables de Entorno Principales
 
@@ -261,7 +286,7 @@ El archivo `.env` (generado por `install.sh`) contiene todas las configuraciones
 | `SERVER_URL` | URL pública del control plane | `https://ts.midominio.com` |
 | `HEADPLANE_PUBLIC_URL` | URL pública de la UI (la UI va en `/admin`) | `https://admin.midominio.com` |
 | `ENABLE_SSL` | **Arrancar Caddy** (profile `ssl`), *no* "hay HTTPS" | `true` o `false` |
-| `SSL_MODE` | Origen del certificado | `letsencrypt`, `selfsigned`, `external`, `none` |
+| `SSL_MODE` | Origen del certificado (`none` = Caddy enruta por HTTP) | `letsencrypt`, `selfsigned`, `external`, `none` |
 | `ACME_EMAIL` | Email para Let's Encrypt | `admin@midominio.com` |
 | `BACKEND_HOST` | IP de esta máquina vista desde el proxy | `192.168.1.10` |
 | `PROXY_CIDR` | CIDR del proxy → `trusted_proxies` de Headscale | `192.168.1.50/32` |
@@ -280,8 +305,8 @@ Ver [.env.example](.env.example) para la lista completa de variables.
 
 | Puerto | Protocolo | Servicio | Descripción |
 |--------|-----------|----------|-------------|
-| 80 | TCP | Caddy | HTTP (redirección a HTTPS) — sólo `standalone` |
-| 443 | TCP/UDP | Caddy | HTTPS / HTTP/3 — sólo `standalone` |
+| 80 | TCP | Caddy | HTTP — sólo `standalone`. Redirige a HTTPS, salvo con `SSL_MODE=none`, donde sirve el tráfico |
+| 443 | TCP/UDP | Caddy | HTTPS / HTTP/3 — sólo `standalone` y sólo si hay certificado |
 | 3000 | TCP | Headplane | Web UI (interno en `standalone`, publicado en el resto) |
 | 3478 | UDP | Headscale | DERP/STUN — **siempre directo, nunca vía proxy** |
 | 8080 | TCP | Headscale | API HTTP (interno en `standalone`, publicado en el resto) |

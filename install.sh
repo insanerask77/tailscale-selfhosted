@@ -408,21 +408,23 @@ load_existing_config() {
 # El modo de despliegue determina tres cosas que antes iban mezcladas en
 # ENABLE_SSL: quién termina TLS, si arranca Caddy, y si hay uno o dos dominios.
 #
-#   standalone   Caddy embebido termina TLS. Un dominio, UI en /admin.
+#   standalone   Caddy embebido enruta / y /admin. Con TLS o sin él.
 #   proxy-single Proxy externo termina TLS. Un dominio, UI en /admin.
 #   proxy-split  Proxy externo termina TLS. Dominios separados (requiere CORS).
-#   plain        Sin TLS. Puertos publicados directamente. Sólo LAN/desarrollo.
+#   plain        Sin Caddy y sin TLS. Puertos crudos. Sólo LAN/desarrollo.
 configure_deployment_mode() {
     print_header "MODO DE DESPLIEGUE"
 
     DEPLOY_MODE=$(ask_choice "¿Cómo se va a exponer este stack?" "${DEPLOY_MODE:-standalone}" \
-        "standalone|Todo-en-uno con Caddy incluido|Caddy termina TLS en esta máquina. Un solo dominio: la UI queda en /admin. Sin dependencias externas." \
+        "standalone|Todo-en-uno con Caddy incluido|Caddy enruta un solo dominio: / -> Headscale, /admin -> Headplane. El certificado se elige después y puede ser ninguno (http://)." \
         "proxy-single|Detrás de un proxy externo, un dominio|Nginx Proxy Manager/Traefik termina TLS. Un dominio: / -> Headscale, /admin -> Headplane. Sin CORS." \
         "proxy-split|Detrás de un proxy externo, dominios separados|Un dominio para el control plane y otro para la UI. Necesita cabeceras CORS en el proxy." \
-        "plain|HTTP plano, sin TLS|Puertos publicados sin cifrar. Sólo para LAN de confianza y desarrollo.")
+        "plain|Sin Caddy: puertos crudos|Headscale y Headplane publicados en puertos distintos, sin cifrar y sin enrutado por ruta. Sólo depuración y LAN de confianza.")
 
     case "$DEPLOY_MODE" in
         standalone)
+            # URL_SCHEME queda pendiente: depende del certificado, que se
+            # elige en configure_network.
             RUN_CADDY="true";  URL_SCHEME="https"; SPLIT_DOMAINS="false" ;;
         proxy-single)
             RUN_CADDY="false"; URL_SCHEME="https"; SPLIT_DOMAINS="false"; SSL_MODE="external" ;;
@@ -471,25 +473,41 @@ configure_network() {
     fi
 
     # El tipo de certificado sólo se pregunta cuando Caddy es quien lo emite.
+    # "none" no desactiva Caddy: sigue enrutando / y /admin, sólo que por HTTP.
     if [[ "$RUN_CADDY" == "true" ]]; then
+        # Let's Encrypt no emite para IPs ni para localhost, así que en esos
+        # casos ni se ofrece en vez de dejar que falle el reto ACME.
+        local cert_options=()
         if [[ "$DOMAIN" =~ ^[0-9.]+$ ]] || [[ "$DOMAIN" == "localhost" ]]; then
-            print_warning "Has indicado una IP o localhost: Let's Encrypt necesita un dominio público"
-            SSL_MODE="selfsigned"
-        elif ask_yes_no "¿El DNS de ${DOMAIN} apunta ya a esta máquina (necesario para Let's Encrypt)?" "y"; then
-            SSL_MODE="letsencrypt"
-            print_info "Let's Encrypt necesita un email para avisos de renovación"
-            ACME_EMAIL=$(ask_input "Email para Let's Encrypt" "${ACME_EMAIL:-admin@${DOMAIN}}" "validate_email")
+            print_warning "Has indicado una IP o localhost: Let's Encrypt no emite certificados para eso"
         else
-            SSL_MODE="selfsigned"
+            cert_options+=("letsencrypt|Let's Encrypt|Certificado público y de confianza para ${DOMAIN}. Requiere que su DNS ya apunte aquí y que los puertos 80 y 443 sean accesibles desde internet.")
         fi
+        cert_options+=("selfsigned|Autofirmado (CA interna de Caddy)|HTTPS sin dependencias externas. Hay que instalar la CA en cada cliente Tailscale o no conectarán.")
+        cert_options+=("none|Ninguno: sólo HTTP|Caddy sigue enrutando / y /admin, pero sin cifrar: http://${DOMAIN}. Para acceso local o por VPN ya existente.")
 
-        if [[ "$SSL_MODE" == "selfsigned" ]]; then
-            print_info "Se usará un certificado autofirmado"
-            print_warning "Tendrás que instalar la CA en cada cliente Tailscale (se exporta al final)"
-        fi
+        SSL_MODE=$(ask_choice "¿Qué certificado debe usar Caddy?" \
+            "${SSL_MODE:-letsencrypt}" "${cert_options[@]}")
+
+        case "$SSL_MODE" in
+            letsencrypt)
+                URL_SCHEME="https"
+                print_info "Let's Encrypt necesita un email para avisos de renovación"
+                ACME_EMAIL=$(ask_input "Email para Let's Encrypt" "${ACME_EMAIL:-admin@${DOMAIN}}" "validate_email")
+                ;;
+            selfsigned)
+                URL_SCHEME="https"
+                print_info "Se usará un certificado autofirmado"
+                print_warning "Tendrás que instalar la CA en cada cliente Tailscale (se exporta al final)"
+                ;;
+            none)
+                URL_SCHEME="http"
+                print_info "Caddy escuchará en HTTP y enrutará / y /admin sin certificado"
+                ;;
+        esac
     fi
 
-    if [[ "$DEPLOY_MODE" == "plain" ]]; then
+    if [[ "$URL_SCHEME" == "http" ]]; then
         print_warning "ADVERTENCIA: el plano de control viajará sin cifrar"
         print_warning "No expongas esto a internet"
     fi
@@ -549,8 +567,15 @@ configure_ports() {
     print_info "Puertos por defecto recomendados. Presiona Enter para usar los valores por defecto."
 
     if [[ "$RUN_CADDY" == "true" ]]; then
-        HTTP_PORT=$(ask_input "Puerto HTTP (para redirección a HTTPS)" "${HTTP_PORT:-80}" "validate_port")
-        HTTPS_PORT=$(ask_input "Puerto HTTPS" "${HTTPS_PORT:-443}" "validate_port")
+        if [[ "$SSL_MODE" == "none" ]]; then
+            # Sin TLS, Caddy sólo escucha en HTTP: preguntar por el puerto
+            # HTTPS sería ofrecer un puerto que nadie va a abrir.
+            HTTP_PORT=$(ask_input "Puerto HTTP (donde escuchará Caddy)" "${HTTP_PORT:-80}" "validate_port")
+            HTTPS_PORT="443"
+        else
+            HTTP_PORT=$(ask_input "Puerto HTTP (para redirección a HTTPS)" "${HTTP_PORT:-80}" "validate_port")
+            HTTPS_PORT=$(ask_input "Puerto HTTPS" "${HTTPS_PORT:-443}" "validate_port")
+        fi
         HEADPLANE_PORT="3000"  # Interno, sólo accesible por Caddy
     else
         # Sin Caddy, estos dos puertos se publican en el host: son los que el
@@ -578,11 +603,17 @@ configure_ports() {
 compute_public_urls() {
     case "$DEPLOY_MODE" in
         standalone)
-            # Caddy sirve ambos en el mismo dominio y enruta por ruta.
+            # Caddy sirve ambos en el mismo dominio y enruta por ruta. Sin
+            # certificado escucha en HTTP_PORT; con él, en HTTPS_PORT.
             local suffix=""
-            [[ "$HTTPS_PORT" != "443" ]] && suffix=":${HTTPS_PORT}"
-            HEADSCALE_PUBLIC_URL="https://${DOMAIN}${suffix}"
-            HEADPLANE_PUBLIC_URL="https://${DOMAIN}${suffix}"
+            if [[ "$SSL_MODE" == "none" ]]; then
+                [[ "$HTTP_PORT" != "80" ]] && suffix=":${HTTP_PORT}"
+                HEADSCALE_PUBLIC_URL="http://${DOMAIN}${suffix}"
+            else
+                [[ "$HTTPS_PORT" != "443" ]] && suffix=":${HTTPS_PORT}"
+                HEADSCALE_PUBLIC_URL="https://${DOMAIN}${suffix}"
+            fi
+            HEADPLANE_PUBLIC_URL="$HEADSCALE_PUBLIC_URL"
             ;;
         proxy-single)
             # El proxy externo escucha en 443 estándar; sin puerto en la URL.
@@ -921,23 +952,44 @@ generate_caddyfile() {
     print_header "GENERANDO CADDYFILE"
 
     # Configurar dominio y TLS según el modo
-    if [[ "$SSL_MODE" == "letsencrypt" ]]; then
-        CADDY_DOMAIN="$DOMAIN"
-        CADDY_TLS="tls ${ACME_EMAIL}"
-        CADDY_HSTS="Strict-Transport-Security \"max-age=31536000; includeSubDomains; preload\""
-    else
-        CADDY_DOMAIN="$DOMAIN"
-        CADDY_TLS="tls internal"
-        CADDY_HSTS="# HSTS deshabilitado (certificado autofirmado)"
-    fi
+    case "$SSL_MODE" in
+        letsencrypt)
+            CADDY_DOMAIN="$DOMAIN"
+            CADDY_TLS="tls ${ACME_EMAIL}"
+            CADDY_HSTS="Strict-Transport-Security \"max-age=31536000; includeSubDomains; preload\""
+            ;;
+        none)
+            # ":80" en vez de "http://${DOMAIN}" a propósito: sin certificado
+            # el sitio suele alcanzarse por varios nombres (localhost, la IP
+            # de la LAN, un hostname interno) y un site address con dominio
+            # devolvería 404 a todos los demás. Escuchar en el puerto sin
+            # filtrar por Host es lo que hace útil este modo.
+            #
+            # Caddy no intenta emitir ningún certificado para una dirección
+            # sin esquema ni host, así que no hace falta "auto_https off".
+            CADDY_DOMAIN=":80"
+            CADDY_TLS="# Sin TLS: Caddy sólo actúa de reverse proxy por HTTP"
+            CADDY_HSTS="# HSTS deshabilitado (sin TLS)"
+            ;;
+        *)
+            CADDY_DOMAIN="$DOMAIN"
+            CADDY_TLS="tls internal"
+            CADDY_HSTS="# HSTS deshabilitado (certificado autofirmado)"
+            ;;
+    esac
 
-    # Redirección HTTP a HTTPS
-    HTTP_REDIRECT=$(cat <<EOF
+    # Redirección HTTP a HTTPS. Sin TLS no hay a dónde redirigir: el propio
+    # sitio ya es el de HTTP y añadir este bloque daría un bucle.
+    if [[ "$SSL_MODE" == "none" ]]; then
+        HTTP_REDIRECT=""
+    else
+        HTTP_REDIRECT=$(cat <<EOF
 http://${DOMAIN} {
     redir https://{host}{uri} permanent
 }
 EOF
-    )
+        )
+    fi
 
     # Cargar plantilla y sustituir variables
     export CADDY_DOMAIN CADDY_TLS CADDY_HSTS HEADSCALE_HTTP_PORT HTTP_REDIRECT
@@ -948,25 +1000,56 @@ EOF
 }
 
 generate_compose_override() {
-    # Con Caddy embebido nadie más necesita alcanzar los contenedores: Caddy
-    # los resuelve por la red de Docker y no se publica ningún puerto extra.
-    if [[ "$RUN_CADDY" == "true" ]]; then
-        rm -f "$SCRIPT_DIR/docker-compose.override.yml"
-        return 0
-    fi
-
     print_header "GENERANDO DOCKER COMPOSE OVERRIDE"
 
-    print_info "Publicando puertos en ${BIND_ADDRESS:-0.0.0.0} para el acceso externo..."
+    local header
+    header=$(cat <<'EOF'
+# Docker Compose Override - Generado automáticamente por install.sh
+# Publica los puertos que dependen del modo de despliegue.
+#
+# Compose FUSIONA las listas de 'ports' añadiendo, nunca quitando, así que
+# los puertos variables no pueden estar en docker-compose.yml: si estuvieran,
+# este fichero no podría retirarlos.
+#
+# NO editar a mano: install.sh lo regenera en cada ejecución.
+EOF
+    )
 
     # BIND_ADDRESS se interpola ahora (heredoc sin comillas) porque Compose no
     # admite variables en la parte de la IP de un mapeo de puertos.
-    cat > "$SCRIPT_DIR/docker-compose.override.yml" <<EOF
-# Docker Compose Override - Generado automáticamente por install.sh
-# Se usa en los modos sin Caddy (proxy-single, proxy-split, plain) para
-# publicar los puertos que debe alcanzar el proxy externo o el cliente.
-#
-# NO editar a mano: install.sh lo regenera en cada ejecución.
+    if [[ "$RUN_CADDY" == "true" ]]; then
+        # Con Caddy embebido nadie más necesita alcanzar a Headscale ni a
+        # Headplane: Caddy los resuelve por la red de Docker.
+        if [[ "$SSL_MODE" == "none" ]]; then
+            print_info "Publicando sólo el puerto HTTP de Caddy (sin TLS)..."
+            cat > "$SCRIPT_DIR/docker-compose.override.yml" <<EOF
+${header}
+
+services:
+  caddy:
+    ports:
+      # Sin TLS: sólo HTTP. No se publica 443 porque nada escucharía ahí.
+      - "\${HTTP_PORT:-80}:80"
+EOF
+        else
+            print_info "Publicando los puertos HTTP y HTTPS de Caddy..."
+            cat > "$SCRIPT_DIR/docker-compose.override.yml" <<EOF
+${header}
+
+services:
+  caddy:
+    ports:
+      # HTTP: reto ACME de Let's Encrypt y redirección a HTTPS
+      - "\${HTTP_PORT:-80}:80"
+      - "\${HTTPS_PORT:-443}:443"
+      # HTTP/3 (QUIC)
+      - "\${HTTPS_PORT:-443}:443/udp"
+EOF
+        fi
+    else
+        print_info "Publicando puertos en ${BIND_ADDRESS:-0.0.0.0} para el acceso externo..."
+        cat > "$SCRIPT_DIR/docker-compose.override.yml" <<EOF
+${header}
 
 services:
   headscale:
@@ -979,6 +1062,7 @@ services:
       # Interfaz web -> destino del proxy para /admin o el dominio de la UI
       - "${BIND_ADDRESS:-0.0.0.0}:\${HEADPLANE_PORT:-3000}:3000"
 EOF
+    fi
 
     print_success "docker-compose.override.yml generado"
 }
@@ -1361,6 +1445,9 @@ show_access_info() {
     echo ""
     echo -e "${GREEN}${BOLD}✓ Headscale + Headplane están corriendo${NC}"
     echo -e "${CYAN}Modo de despliegue:${NC} ${BOLD}${DEPLOY_MODE}${NC}"
+    if [[ "$RUN_CADDY" == "true" ]]; then
+        echo -e "${CYAN}Certificado:${NC} ${BOLD}${SSL_MODE}${NC}"
+    fi
     echo ""
 
     # URLs de acceso
@@ -1392,9 +1479,9 @@ show_access_info() {
 
     # El aviso de TLS depende del modo, no de si Caddy arranca: con proxy
     # externo hay HTTPS aunque aquí no corra ningún terminador TLS.
-    if [[ "$DEPLOY_MODE" == "plain" ]]; then
+    if [[ "$URL_SCHEME" == "http" ]]; then
         print_warning "El plano de control viaja sin cifrar (HTTP)"
-        echo -e "   No expongas estos puertos fuera de una red de confianza."
+        echo -e "   No expongas esto fuera de una red de confianza."
         echo ""
     fi
 
@@ -1486,11 +1573,8 @@ show_access_info() {
     echo "• Configuración: .env"
     echo "• Config Headscale: headscale-config.yaml"
     echo "• Config Headplane: headplane-config.yaml"
-    if [[ "$RUN_CADDY" == "true" ]]; then
-        echo "• Caddyfile: Caddyfile"
-    else
-        echo "• Override de puertos: docker-compose.override.yml"
-    fi
+    [[ "$RUN_CADDY" == "true" ]] && echo "• Caddyfile: Caddyfile"
+    echo "• Override de puertos: docker-compose.override.yml"
     if [[ "$DEPLOY_MODE" == "proxy-single" || "$DEPLOY_MODE" == "proxy-split" ]]; then
         echo "• Config del proxy externo: reverse-proxy/"
     fi
