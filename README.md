@@ -22,7 +22,9 @@
 - [Requisitos](#-requisitos)
 - [Instalación Rápida](#-instalación-rápida)
 - [Configuración](#-configuración)
-  - [Modos de despliegue](#modos-de-despliegue)
+  - [Un solo modo de despliegue](#un-solo-modo-de-despliegue)
+  - [Quién pone el HTTPS](#quién-pone-el-https)
+  - [Un proxy por delante](#un-proxy-por-delante)
 - [Uso](#-uso)
 - [Arquitectura](#-arquitectura)
 - [Reconfiguración](#-reconfiguración)
@@ -134,10 +136,10 @@ cd tailscale-selfhosted
 ```
 
 El instalador te preguntará:
-- Modo de despliegue (ver [Modos de despliegue](#modos-de-despliegue))
 - Dominio o IP de acceso
-- Qué certificado usar: Let's Encrypt, autofirmado o **ninguno** (Caddy sigue
-  enrutando, pero por HTTP)
+- **Quién pone el HTTPS**: Caddy con Let's Encrypt, Caddy con certificado
+  autofirmado, un proxy que ya tengas por delante, o nadie (sólo HTTP).
+  Ver [Quién pone el HTTPS](#quién-pone-el-https)
 - Puertos a usar (con defaults razonables)
 - Nombre de tu organización/tailnet
 - ¿Integrar OIDC? (opcional)
@@ -161,120 +163,108 @@ nano .env
 export $(cat .env | xargs)
 envsubst < templates/headscale-config.yaml.tmpl > headscale-config.yaml
 envsubst < templates/headplane-config.yaml.tmpl > headplane-config.yaml
-envsubst < templates/Caddyfile.tmpl > Caddyfile  # Si SSL habilitado
+envsubst < templates/Caddyfile.tmpl > Caddyfile
 
 # 4. Levantar los servicios
-docker compose --profile ssl up -d  # Con SSL
-# O
-docker compose up -d  # Sin SSL
+docker compose up -d
 ```
+
+> Por esta vía tendrás que escribir a mano `docker-compose.override.yml` con
+> los puertos de Caddy: `docker-compose.yml` no los declara a propósito (ver
+> [Puertos utilizados](#puertos-utilizados)).
 
 ---
 
 ## ⚙️ Configuración
 
-### Modos de despliegue
+### Un solo modo de despliegue
 
-Lo primero que pregunta el instalador. La respuesta determina quién termina
-TLS, si arranca Caddy y cuántos dominios hacen falta:
-
-| Modo | Quién termina TLS | Dominios | Caddy | Cuándo usarlo |
-|------|-------------------|----------|-------|---------------|
-| **`standalone`** | Caddy, en esta máquina (o nadie) | 1 | ✅ arranca | Una sola máquina, sin nada delante. Lo más simple. |
-| **`proxy-single`** | Proxy externo | 1 | ❌ | Ya tienes NPM/Traefik y quieres un único dominio. |
-| **`proxy-split`** | Proxy externo | 2 | ❌ | Control plane y UI en dominios distintos. |
-| **`plain`** | Nadie (HTTP) | 1 | ❌ | LAN de confianza y desarrollo. |
-
-En **todos** los modos la interfaz web se sirve bajo **`/admin`**: el prefijo
-está compilado en la imagen de Headplane y no se puede quitar con un rewrite
-en el proxy.
-
-**`standalone`** — todo en una máquina:
+No hay modos que elegir. **Caddy arranca siempre** y enruta un único dominio:
 
 ```
-cliente ──HTTPS──▶ Caddy ─┬─▶ /       Headscale
-                          └─▶ /admin  Headplane
+cliente ──▶ Caddy ─┬─▶ /       Headscale   (control plane)
+                   └─▶ /admin  Headplane   (interfaz web)
 ```
 
-Dentro de `standalone` el certificado es una segunda pregunta, y **una de las
-respuestas es "ninguno"**: Caddy arranca igual y sigue enrutando `/` y
-`/admin`, sólo que por HTTP.
+Headscale y Headplane **no publican ningún puerto en el host**: sólo los
+alcanza Caddy por la red interna de Docker. La única excepción es el UDP
+DERP/STUN (3478), que va directo porque ningún proxy HTTP lo transporta.
 
-| `SSL_MODE` | Esquema | Qué hace Caddy | Puertos publicados |
+La interfaz web se sirve siempre bajo **`/admin`**: el prefijo está compilado
+en la imagen de Headplane y no se puede quitar con un rewrite en el proxy.
+
+### Quién pone el HTTPS
+
+Es la única decisión de arquitectura, y se guarda en `SSL_MODE`:
+
+| `SSL_MODE` | Quién termina TLS | URL pública | Puertos que publica Caddy |
 |---|---|---|---|
-| `letsencrypt` | `https://` | Pide el certificado del dominio a Let's Encrypt y redirige HTTP → HTTPS | 80, 443, 443/udp |
-| `selfsigned` | `https://` | Firma con su CA interna (`tls internal`); hay que instalar la CA en cada cliente | 80, 443, 443/udp |
-| `none` | `http://` | Sólo reverse proxy, sin cifrar ni redirección | 80 |
+| `letsencrypt` | Caddy, con certificado de Let's Encrypt | `https://vpn.midominio.com` | 80, 443, 443/udp |
+| `selfsigned` | Caddy, con su CA interna (`tls internal`) | `https://vpn.midominio.com` | 80, 443, 443/udp |
+| `front` | Un proxy que ya tienes por delante | `https://vpn.midominio.com` | 80 |
+| `none` | Nadie | `http://vpn.midominio.com` | 80 |
 
-`SSL_MODE=none` es la opción para `http://localhost`, una IP de LAN o un
-acceso que ya viaja por una VPN. Su `Caddyfile` usa el site address `:80` en
-vez del dominio, así que responde a **cualquier** `Host` (localhost, la IP,
-un hostname interno); una dirección sin esquema ni host tampoco dispara la
-emisión automática de certificados, por lo que no hace falta `auto_https off`.
-El instalador ni siquiera ofrece Let's Encrypt si `DOMAIN` es una IP o
-`localhost`, porque el reto ACME no puede completarse para eso.
+- **`letsencrypt`** — lo normal si la máquina es alcanzable desde internet.
+  Necesita DNS público apuntando aquí y los puertos 80/443 abiertos. Caddy
+  renueva solo y redirige HTTP → HTTPS.
+- **`selfsigned`** — HTTPS sin dependencias externas. Hay que instalar la CA
+  de Caddy en **cada** cliente Tailscale o no conectarán; ver
+  [Certificado autofirmado](#certificado-autofirmado-hay-que-instalar-la-ca-en-cada-cliente).
+  El instalador exporta la CA en `caddy-root-ca.crt`.
+- **`front`** — NPM, nginx, Traefik u otro Caddy terminan el TLS en otra
+  máquina y reenvían aquí por HTTP. Ver [Un proxy por delante](#un-proxy-por-delante).
+- **`none`** — sin cifrar. Para `http://localhost`, una LAN de confianza o un
+  acceso que ya viaja por otra VPN.
 
-> ⚠️ Sin TLS el plano de control viaja en claro, incluidas las pre-auth keys
-> y la API key de Headplane. Úsalo sólo en una red de confianza.
+Con `front` y `none`, el `Caddyfile` usa el site address `:80` en vez del
+dominio, así que responde a **cualquier** `Host` (localhost, la IP, el
+hostname con el que lo llame el proxy). Una dirección sin esquema ni host
+tampoco dispara la emisión automática de certificados, por lo que no hace
+falta `auto_https off`. El instalador no ofrece Let's Encrypt si `DOMAIN` es
+una IP o `localhost`, porque el reto ACME no puede completarse para eso.
 
-**`proxy-single`** — un dominio, proxy en otra máquina:
+> ⚠️ Con `SSL_MODE=none` el plano de control viaja en claro, incluidas las
+> pre-auth keys y la API key de Headplane. Úsalo sólo en una red de confianza.
+
+### Un proxy por delante
+
+Con `SSL_MODE=front` el instalador pregunta qué proxy usas y **escupe el
+snippet ya rellenado** en `reverse-proxy/`:
+
+| Respuesta | Fichero generado |
+|---|---|
+| Nginx Proxy Manager | `reverse-proxy/NGINX-PROXY-MANAGER.md` — los campos del Proxy Host y el bloque para la caja *Advanced* |
+| nginx | `reverse-proxy/nginx-<dominio>.conf` — un `server{}` completo para `/etc/nginx/conf.d/` |
+| Traefik | `reverse-proxy/traefik-<dominio>.yml` — configuración dinámica para el file provider |
+| Caddy | `reverse-proxy/Caddyfile` — el bloque del Caddy de borde |
 
 ```
-cliente ──HTTPS──▶ NPM ─┬─▶ HTTP  backend:8080  Headscale   (vpn.midominio.com/)
-                        └─▶ HTTP  backend:3000  Headplane   (vpn.midominio.com/admin)
+cliente ──HTTPS──▶ NPM ──HTTP──▶ Caddy ─┬─▶ /       Headscale
+        (borde)                         └─▶ /admin  Headplane
 ```
 
-**`proxy-split`** — dos dominios (necesita CORS):
+Como Caddy ya enruta por ruta, **el proxy de delante tiene un solo destino**:
+`BACKEND_HOST:HTTP_PORT`. No necesita saber nada de `/admin` ni de CORS, y por
+eso el snippet es corto. Lo único que no puede faltar en cualquiera de ellos:
 
-```
-cliente ──HTTPS──▶ NPM ─┬─▶ ts.midominio.com    ─▶ HTTP backend:8080  Headscale
-                        └─▶ admin.midominio.com ─▶ HTTP backend:3000  Headplane
-```
-
-En los dos modos `proxy-*` el instalador escribe en `reverse-proxy/` los
-ficheros de Nginx ya rellenados y una guía paso a paso para Nginx Proxy
-Manager (`REVERSE-PROXY.md`). Cópialos a la máquina del proxy.
+- **Paso del `Upgrade`** (en NPM, la casilla *Websockets Support*). `/ts2021`,
+  el protocolo de control actual, viaja sobre una conexión *upgraded*; sin
+  esto ningún nodo llega a registrarse. HTTP/2 prohíbe esas cabeceras, así que
+  el salto hacia el backend tiene que ser HTTP/1.1.
+- **`proxy_read_timeout 3600s` y `proxy_buffering off`.** `/machine/map` es un
+  long-poll permanente; con el timeout por defecto (60 s) los nodos se
+  reconectan en bucle.
+- **`client_max_body_size 0`.** Los mapas de red pueden ser grandes.
 
 > ⚠️ **El puerto UDP DERP (3478) no pasa por ningún reverse proxy HTTP.**
-> Ábrelo directamente contra la máquina de Headscale, o desactiva
-> `derp.server.enabled` en `headscale-config.yaml` y usa los relays públicos
-> de Tailscale.
+> Ábrelo directamente contra esta máquina, o desactiva `derp.server.enabled`
+> en `headscale-config.yaml` y usa los relays públicos de Tailscale.
 
-> ⚠️ En los modos `proxy-*` y `plain`, los puertos 8080 y 3000 se publican
-> **sin cifrar**. Restringe el acceso por firewall a la IP del proxy
-> (el instalador la pide como `PROXY_CIDR`).
-
-#### ¿Y encadenar Caddy en local sin TLS, detrás del proxy externo?
-
-Es decir: Caddy escuchando HTTP en la máquina de Headscale, haciendo el
-enrutado por ruta, y NPM delante poniendo el TLS. Es un patrón válido
-(proxy de borde + router interno), pero **no es el modo predeterminado a
-propósito**, porque en este stack aporta poco y cuesta más de lo que parece:
-
-- **No simplifica NPM.** Los dos ajustes críticos son de la primera capa:
-  *Websockets Support* (si NPM no pasa el `Upgrade`, `/ts2021` muere antes de
-  llegar a Caddy) y `proxy_read_timeout 3600s` + `proxy_buffering off` (si NPM
-  corta a los 60 s, `/machine/map` se reconecta en bucle aunque Caddy esté
-  perfecto). El Proxy Host nunca llega a ser un pass-through tonto; lo único
-  que te ahorras es el `location /admin`.
-- **Complica la IP real del cliente.** Con dos proxies, `trusted_proxies` de
-  Headscale pasa a ser el CIDR de la red Docker (`172.18.0.0/16`, mucho más
-  amplio que `<ip-del-proxy>/32`) y además Caddy necesita su propio
-  `trusted_proxies` apuntando a NPM. Es un sitio más donde la IP real sale
-  mal, y ese fallo es silencioso: los nodos simplemente aparecen todos con la
-  misma IP en los logs.
-- **No gana seguridad.** El salto NPM → Caddy va en claro igual que iría
-  NPM → Headscale.
-- **No ayuda con DERP.** El UDP 3478 sigue teniendo que ir directo.
-
-Lo único que sí aporta es exponer **un solo puerto** en la máquina del backend
-en lugar de dos, y dejar el enrutado por ruta versionado en el `Caddyfile` en
-vez de en la UI de NPM. Si eso te compensa, no hace falta un modo nuevo: parte
-de **`standalone` con `SSL_MODE=none`**: eso ya te deja el `Caddyfile` con
-sitio `:80` y un `docker-compose.override.yml` que publica sólo el puerto de
-Caddy. Lo que queda por tu cuenta es apuntar NPM a ese puerto y ajustar los
-dos `trusted_proxies` (el de Caddy, hacia NPM, y el de Headscale, hacia la red
-Docker).
+**IP real de los clientes.** Headscale lleva `trusted_proxies: 172.16.0.0/12`
+(el rango de las redes bridge de Docker, donde vive Caddy). Con un proxy más
+por delante, la cadena `X-Forwarded-For` tiene dos saltos: añade también el
+CIDR de esa máquina en `headscale-config.yaml` o todos los nodos aparecerán en
+los logs con la misma IP. Headscale rechaza el prefijo `/0`.
 
 ### Variables de Entorno Principales
 
@@ -282,22 +272,18 @@ El archivo `.env` (generado por `install.sh`) contiene todas las configuraciones
 
 | Variable | Descripción | Ejemplo |
 |----------|-------------|---------|
-| `DEPLOY_MODE` | Modo de despliegue (ver tabla de arriba) | `standalone`, `proxy-split` |
-| `SERVER_URL` | URL pública del control plane | `https://ts.midominio.com` |
-| `HEADPLANE_PUBLIC_URL` | URL pública de la UI (la UI va en `/admin`) | `https://admin.midominio.com` |
-| `ENABLE_SSL` | **Arrancar Caddy** (profile `ssl`), *no* "hay HTTPS" | `true` o `false` |
-| `SSL_MODE` | Origen del certificado (`none` = Caddy enruta por HTTP) | `letsencrypt`, `selfsigned`, `external`, `none` |
+| `DOMAIN` | Dominio o IP con el que se accede al stack | `vpn.midominio.com` |
+| `SSL_MODE` | Quién pone el HTTPS (ver tabla de arriba) | `letsencrypt`, `selfsigned`, `front`, `none` |
+| `SERVER_URL` | URL pública del control plane (`--login-server`) | `https://vpn.midominio.com` |
+| `HEADPLANE_PUBLIC_URL` | URL pública de la UI (la UI va en `/admin`) | `https://vpn.midominio.com` |
+| `URL_SCHEME` | Derivado de `SSL_MODE` | `https` o `http` |
 | `ACME_EMAIL` | Email para Let's Encrypt | `admin@midominio.com` |
+| `FRONT_PROXY` | Qué snippet generar (sólo con `SSL_MODE=front`) | `npm`, `nginx`, `traefik`, `caddy` |
 | `BACKEND_HOST` | IP de esta máquina vista desde el proxy | `192.168.1.10` |
-| `PROXY_CIDR` | CIDR del proxy → `trusted_proxies` de Headscale | `192.168.1.50/32` |
-| `BIND_ADDRESS` | Interfaz donde publicar los puertos sin Caddy | `0.0.0.0` |
+| `HTTP_PORT` / `HTTPS_PORT` | Puertos que publica Caddy | `80` / `443` |
 | `TAILNET_NAME` | Nombre de la organización | `myorg` |
 | `ENABLE_OIDC` | Habilitar autenticación OIDC | `true` o `false` |
 | `OIDC_ISSUER_URL` | URL del proveedor OIDC | `https://auth.example.com/realms/master` |
-
-> `ENABLE_SSL` tiene un nombre heredado y engañoso: significa "levantar el
-> contenedor Caddy". En `proxy-single` y `proxy-split` vale `false` y **sí**
-> hay HTTPS, sólo que lo termina el proxy externo.
 
 Ver [.env.example](.env.example) para la lista completa de variables.
 
@@ -305,13 +291,18 @@ Ver [.env.example](.env.example) para la lista completa de variables.
 
 | Puerto | Protocolo | Servicio | Descripción |
 |--------|-----------|----------|-------------|
-| 80 | TCP | Caddy | HTTP — sólo `standalone`. Redirige a HTTPS, salvo con `SSL_MODE=none`, donde sirve el tráfico |
-| 443 | TCP/UDP | Caddy | HTTPS / HTTP/3 — sólo `standalone` y sólo si hay certificado |
-| 3000 | TCP | Headplane | Web UI (interno en `standalone`, publicado en el resto) |
+| 80 | TCP | Caddy | HTTP. Con certificado propio sólo hace el reto ACME y redirige a HTTPS; con `front` o `none` sirve el tráfico |
+| 443 | TCP/UDP | Caddy | HTTPS / HTTP/3. Sólo se publica si Caddy tiene el certificado |
 | 3478 | UDP | Headscale | DERP/STUN — **siempre directo, nunca vía proxy** |
-| 8080 | TCP | Headscale | API HTTP (interno en `standalone`, publicado en el resto) |
-| 50443 | TCP | Headscale | gRPC (interno) |
-| 9090 | TCP | Headscale | Metrics (interno, opcional) |
+| 3000 | TCP | Headplane | Web UI — interno, no se publica |
+| 8080 | TCP | Headscale | API HTTP — interno, no se publica |
+| 50443 | TCP | Headscale | gRPC — interno |
+| 9090 | TCP | Headscale | Metrics — interno, opcional |
+
+Los puertos de Caddy se publican desde `docker-compose.override.yml`, que
+genera el instalador, y no desde `docker-compose.yml`: Compose **fusiona** las
+listas de `ports` añadiendo, nunca quitando, así que un override no podría
+retirar el 443 cuando no hay certificado.
 
 ---
 
@@ -410,21 +401,20 @@ cuenta y Headscale rechaza la petición: 87 + 14 = 101 caracteres.
 
 ### Dos URLs distintas: control plane e interfaz web
 
-Headscale y Headplane son servicios separados y **no comparten URL**:
+Headscale y Headplane son servicios separados, pero comparten dominio: Caddy
+enruta por ruta.
 
-| | Control plane (Headscale) | Interfaz web (Headplane) |
-|---|---|---|
-| **Con proxy** (`ENABLE_SSL=true`) | `https://vpn.midominio.com` | `https://vpn.midominio.com/admin` |
-| **Sin proxy** (`ENABLE_SSL=false`) | `http://vpn.midominio.com:8080` | `http://vpn.midominio.com:3000/admin` |
+| | URL |
+|---|---|
+| Control plane (Headscale) | `https://vpn.midominio.com` |
+| Interfaz web (Headplane) | `https://vpn.midominio.com/admin` |
 
-La primera es la que va en `--login-server`. Con proxy, Caddy las sirve en el
-mismo dominio y enruta por ruta: `/admin*` va a Headplane y **todo lo demás** a
-Headscale, porque los clientes Tailscale usan la raíz del dominio (`/key`,
-`/ts2021`, `/machine/*`, `/derp`, `/bootstrap-dns`…).
+La primera es la que va en `--login-server`. `/admin*` va a Headplane y **todo
+lo demás** a Headscale, porque los clientes Tailscale usan la raíz del dominio
+(`/key`, `/ts2021`, `/machine/*`, `/derp`, `/bootstrap-dns`…).
 
-Sin proxy cada servicio se expone en su propio puerto, así que las URLs
-**incluyen el puerto y son diferentes**. Ambas quedan guardadas en `.env` como
-`HEADSCALE_PUBLIC_URL` y `HEADPLANE_PUBLIC_URL`.
+Ambas quedan guardadas en `.env` como `HEADSCALE_PUBLIC_URL` y
+`HEADPLANE_PUBLIC_URL`; con `SSL_MODE=none` son las mismas pero en `http://`.
 
 ### API key de Headplane
 
@@ -557,11 +547,11 @@ Internet
    - Gestión completa de usuarios, nodos, rutas, ACLs
    - Autenticación local u OIDC
 
-3. **Caddy**: Reverse proxy (opcional, solo si SSL habilitado)
-   - Gestión automática de certificados Let's Encrypt
-   - Redirección HTTP → HTTPS
+3. **Caddy**: Reverse proxy (arranca siempre)
+   - Enruta el único dominio: `/` → Headscale, `/admin` → Headplane
+   - Certificado automático de Let's Encrypt o CA interna, según `SSL_MODE`
+   - Redirección HTTP → HTTPS cuando es él quien tiene el certificado
    - Headers de seguridad
-   - Proxy a Headplane
 
 ### Volúmenes
 
@@ -600,12 +590,12 @@ envsubst < templates/headplane-config.yaml.tmpl > headplane-config.yaml
 
 # 3. Reiniciar servicios
 docker compose down
-docker compose --profile ssl up -d  # Ajustar según SSL
+docker compose up -d
 ```
 
-### Cambiar de modo de despliegue
+### Cambiar quién pone el HTTPS
 
-Re-ejecuta el instalador y elige otro modo en la primera pregunta:
+Re-ejecuta el instalador y responde otra cosa a la pregunta del HTTPS:
 
 ```bash
 ./install.sh
@@ -613,9 +603,7 @@ Re-ejecuta el instalador y elige otro modo en la primera pregunta:
 
 El instalador lee el `.env` actual, propone los valores existentes como
 predeterminados y regenera todo lo que cambie: `headscale-config.yaml`,
-`Caddyfile`, `docker-compose.override.yml` y `reverse-proxy/`. Al pasar de
-`standalone` a un modo `proxy-*` también para y elimina el contenedor de
-Caddy, que si no seguiría ocupando los puertos 80 y 443.
+`Caddyfile`, `docker-compose.override.yml` y `reverse-proxy/`.
 
 > ⚠️ Cambiar `SERVER_URL` (por ejemplo al pasar de `http://ip:8080` a
 > `https://ts.midominio.com`) **invalida el registro de los nodos ya
@@ -675,7 +663,7 @@ docker run --rm \
   alpine sh -c "cd /data && tar xzf /backup/headscale-data-backup-YYYYMMDD.tar.gz"
 
 # 4. Reiniciar servicios
-docker compose --profile ssl up -d
+docker compose up -d
 ```
 
 ### Automatizar Backups
@@ -737,30 +725,32 @@ sudo firewall-cmd --reload
 sudo iptables -A INPUT -p udp --dport 3478 -j ACCEPT
 ```
 
-### Problemas específicos de los modos con proxy externo
+### Problemas con un proxy por delante (`SSL_MODE=front`)
 
 | Síntoma | Causa | Solución |
 |---------|-------|----------|
 | Los nodos se desconectan y reconectan cada ~60 s | `/machine/map` es un long-poll y el proxy lo corta con su `proxy_read_timeout` por defecto | `proxy_read_timeout 3600s;` y `proxy_buffering off;` en el proxy |
-| `tailscale up` se queda colgado sin error | `/ts2021` necesita un `Upgrade` de HTTP/1.1 | Activa *Websockets Support* en NPM, o las cabeceras `Upgrade`/`Connection` en Nginx |
+| `tailscale up` se queda colgado sin error | `/ts2021` necesita un `Upgrade` de HTTP/1.1 | Activa *Websockets Support* en NPM, o las cabeceras `Upgrade`/`Connection` en nginx |
 | La UI carga en blanco | Se intentó quitar el prefijo `/admin` con un `rewrite` | Quita el rewrite: el prefijo está compilado en la imagen |
-| La UI no puede hablar con la API (errores CORS en la consola) | Modo `proxy-split` sin cabeceras CORS | Aplica el bloque CORS de `reverse-proxy/nginx-headscale.conf` |
-| Todos los nodos aparecen con la misma IP en los logs | Falta `trusted_proxies` | Pon el CIDR del proxy en `PROXY_CIDR` y re-ejecuta el instalador |
+| `413 Request Entity Too Large` al registrar un nodo | El mapa de red supera el límite del proxy | `client_max_body_size 0;` |
+| Todos los nodos aparecen con la misma IP en los logs | Falta el CIDR del proxy en `trusted_proxies` | Añádelo en `headscale-config.yaml` y `docker compose restart headscale` |
 | El navegador pierde la sesión de Headplane al recargar | `SESSION_SECURE=false` sirviendo por HTTPS | Re-ejecuta el instalador: lo deriva de `URL_SCHEME` |
-| Los nodos conectan pero no se ven entre sí | UDP 3478 cerrado (no pasa por el proxy) | Ábrelo directo contra la máquina de Headscale |
+| Los nodos conectan pero no se ven entre sí | UDP 3478 cerrado (no pasa por el proxy) | Ábrelo directo contra esta máquina |
 
-Comprobación rápida desde la máquina del proxy, saltándose el proxy:
+Comprobación rápida desde la máquina del proxy, saltándose el proxy y hablando
+directamente con Caddy:
 
 ```bash
 # El control plane responde con su clave pública
-curl -s http://<BACKEND_HOST>:8080/key?v=142
+curl -s http://<BACKEND_HOST>:<HTTP_PORT>/key?v=142
 
 # La UI responde en /admin
-curl -sI http://<BACKEND_HOST>:3000/admin | head -1
+curl -sI http://<BACKEND_HOST>:<HTTP_PORT>/admin | head -1
 ```
 
-Si estos dos funcionan pero los dominios públicos no, el problema está en el
-proxy; si fallan, está en la máquina de Headscale (firewall o `BIND_ADDRESS`).
+Si estos dos funcionan pero el dominio público no, el problema está en el
+proxy; si fallan, está en esta máquina (firewall, o Caddy no arrancó:
+`docker compose logs caddy`).
 
 ### Let's Encrypt falla (DNS no propagado)
 
@@ -781,14 +771,15 @@ curl -I http://vpn.midominio.com
 # Opción 1: Esperar a que el DNS se propague (puede tomar hasta 48h)
 # Caddy reintentará automáticamente
 
-# Opción 2: Usar certificado autofirmado temporalmente
-# Editar .env
-SSL_MODE=selfsigned
-
-# Regenerar Caddyfile y reiniciar
-envsubst < templates/Caddyfile.tmpl > Caddyfile
-docker compose restart caddy
+# Opción 2: Usar certificado autofirmado temporalmente.
+# Re-ejecuta el instalador y elige "Caddy, con certificado autofirmado":
+# él regenera el Caddyfile con las directivas correctas.
+./install.sh
 ```
+
+> No basta con cambiar `SSL_MODE` en `.env`: el `Caddyfile` no se genera sólo
+> con `envsubst` desde `.env`, el instalador calcula además el site address,
+> la directiva `tls`, el HSTS y el bloque de redirección.
 
 ### Headplane muestra "Connection refused"
 
@@ -999,3 +990,15 @@ Si tienes problemas:
 Hecho con ❤️ para la comunidad open-source
 
 </div>
+
+
+#### TEST Container
+```docker run -it --rm \
+  --name=tailscaled \
+  -v /dev/net/tun:/dev/net/tun \
+  --network=host \
+  --cap-add=NET_ADMIN \
+  --cap-add=NET_RAW \
+  --entrypoint /bin/sh \
+  tailscale/tailscale \
+  -c 'tailscaled > /dev/null 2>&1 & exec /bin/sh'```

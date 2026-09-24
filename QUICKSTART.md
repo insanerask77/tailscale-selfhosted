@@ -12,56 +12,52 @@ Guía de inicio rápido para tener Headscale + Headplane funcionando en menos de
 
 ### 2. Responder las Preguntas
 
-La primera pregunta es el **modo de despliegue** y condiciona todas las demás:
+Hay **un solo modo de despliegue**: Caddy delante, enrutando un único dominio
+(`/` → Headscale, `/admin` → Headplane). Lo único que se decide es **quién
+pone el HTTPS**:
 
-| Modo | Elígelo si... |
-|------|---------------|
-| **`standalone`** | Es una sola máquina y no tienes nada delante. Caddy enruta `/` y `/admin`, y saca el certificado solo (o ninguno, si no lo quieres). **Empieza por aquí.** |
-| **`proxy-single`** | Ya tienes Nginx Proxy Manager / Traefik y quieres un único dominio. |
-| **`proxy-split`** | Quieres `ts.midominio.com` para el control plane y `admin.midominio.com` para la UI. |
-| **`plain`** | Sólo LAN o desarrollo, sin cifrado. |
+| Respuesta | Elígela si... |
+|-----------|---------------|
+| **Caddy, con Let's Encrypt** | La máquina es alcanzable desde internet, el DNS ya apunta aquí y tienes los puertos 80/443 abiertos. **Empieza por aquí.** |
+| **Caddy, con autofirmado** | Quieres HTTPS sin dependencias externas. Hay que instalar la CA de Caddy en cada cliente Tailscale o no conectarán. |
+| **Un proxy por delante** | Ya tienes Nginx Proxy Manager, nginx, Traefik u otro Caddy terminando el TLS. El instalador te da el snippet listo. |
+| **Nadie: sólo HTTP** | `http://localhost`, una LAN de confianza o un acceso que ya va por otra VPN. |
 
-Después:
+El resto de preguntas:
 
-- **Dominio(s)**: `vpn.midominio.com`, o los dos dominios si elegiste `proxy-split`
-- **Certificado** (sólo en `standalone`), tres opciones:
-  - *Let's Encrypt* — necesita un dominio con DNS público ya apuntando aquí y
-    los puertos 80/443 abiertos. `https://vpn.midominio.com` para todo, con la
-    UI en `/admin`.
-  - *Autofirmado* — HTTPS sin dependencias, pero hay que instalar la CA de
-    Caddy en cada cliente Tailscale o no conectarán.
-  - *Ninguno* — Caddy sigue arrancando y enrutando `/` → Headscale y `/admin`
-    → Headplane, pero por HTTP: `http://localhost`, `http://192.168.1.10`…
-    Para pruebas, LAN de confianza o acceso que ya va por otra VPN.
-- **Acceso desde el proxy** (sólo en los modos `proxy-*`): interfaz donde
-  publicar los puertos, CIDR del proxy y la IP de esta máquina vista por él
+- **Dominio o IP**: `vpn.midominio.com`, `192.168.1.100` o `localhost`
+- **Email** (sólo con Let's Encrypt): para los avisos de renovación
+- **Qué proxy tienes delante** y **la IP de esta máquina vista por él** (sólo
+  si elegiste "un proxy por delante")
 - **Puertos**: Enter para los valores por defecto
 - **Nombre del Tailnet**: `myorg` (o el nombre de tu empresa)
 - **¿OIDC?**: `n` (no, a menos que tengas Keycloak/Authentik)
 
 ### 3. ¡Listo!
 
-Al finalizar verás la API key para entrar en Headplane y las dos URLs:
+Al finalizar verás la API key para entrar en Headplane y las URLs:
 
 ```
 ✓ Headscale + Headplane están corriendo
-Modo de despliegue: standalone
+HTTPS: letsencrypt
 
 Interfaz web (Headplane): https://vpn.midominio.com/admin
 Control plane (Headscale): https://vpn.midominio.com
 ```
 
-En los modos `proxy-*` esas URLs **todavía no responden**: falta configurar la
-otra máquina. El instalador deja todo escrito en `reverse-proxy/`:
+Si elegiste "un proxy por delante", esas URLs **todavía no responden**: falta
+configurar la otra máquina. El instalador deja el snippet en `reverse-proxy/`:
 
 ```bash
 ls reverse-proxy/
-# REVERSE-PROXY.md        guía paso a paso para Nginx Proxy Manager
-# nginx-headscale.conf    para un Nginx que gestiones tú
-# nginx-headplane.conf    (sólo en proxy-split)
+# NGINX-PROXY-MANAGER.md          guía de los campos del Proxy Host
+# nginx-vpn.midominio.com.conf    un server{} completo para nginx
+# traefik-vpn.midominio.com.yml   config dinámica para el file provider
+# Caddyfile                       el bloque del Caddy de borde
 ```
 
-Cópialos a la máquina del proxy y sigue `REVERSE-PROXY.md`.
+Se genera **sólo el que corresponda** al proxy que elegiste. Cópialo a la
+máquina del proxy y aplícalo allí.
 
 ---
 
@@ -73,10 +69,8 @@ El instalador ya ha creado el usuario administrador y una **API key**, que
 muestra por pantalla al terminar. Ábre la UI y pega esa key en el login:
 
 ```
-https://vpn.midominio.com/admin          # standalone / proxy-single
-https://admin.midominio.com/admin        # proxy-split
-http://localhost/admin                   # standalone sin certificado
-http://vpn.midominio.com:3000/admin      # plain
+https://vpn.midominio.com/admin          # con HTTPS (Caddy o un proxy delante)
+http://localhost/admin                   # sin HTTPS
 ```
 
 > Headplane sirve la interfaz bajo la ruta `/admin`. La raíz (`/`) devuelve 404.
@@ -106,14 +100,11 @@ Copia la clave que se muestra (empieza por `hskey-auth-`).
 En tu ordenador/móvil con [Tailscale instalado](https://tailscale.com/download):
 
 ```bash
-# Con TLS (standalone o proxy-*): el control plane vive en la raíz del dominio
-tailscale up --login-server=https://ts.midominio.com --authkey=<tu-clave>
+# Con HTTPS: el control plane vive en la raíz del dominio, sin puerto
+tailscale up --login-server=https://vpn.midominio.com --authkey=<tu-clave>
 
-# standalone sin certificado: igual, pero por HTTP y sin puerto (lo sirve Caddy)
+# Sin HTTPS: igual, pero por HTTP (también sin puerto, lo sirve Caddy)
 tailscale up --login-server=http://vpn.midominio.com --authkey=<tu-clave>
-
-# Modo plain: hay que indicar el puerto de Headscale
-tailscale up --login-server=http://vpn.midominio.com:8080 --authkey=<tu-clave>
 ```
 
 > La URL exacta la muestra el instalador al terminar, y está en `.env` como
@@ -161,8 +152,6 @@ docker compose down
 
 ```bash
 docker compose up -d
-# O si tienes SSL habilitado:
-docker compose --profile ssl up -d
 ```
 
 ---
@@ -193,20 +182,20 @@ Incluye un script con comandos útiles:
 docker compose ps  # Verifica que estén "healthy"
 ```
 
-### Con proxy externo: los dominios no responden
+### Con un proxy por delante: el dominio no responde
 
 **Comprueba primero si el fallo está en el proxy o en el backend.** Desde la
-máquina del proxy, saltándotelo:
+máquina del proxy, hablando directamente con Caddy:
 
 ```bash
-curl -s http://<BACKEND_HOST>:8080/key?v=142      # Headscale
-curl -sI http://<BACKEND_HOST>:3000/admin | head -1  # Headplane
+curl -s http://<BACKEND_HOST>:<HTTP_PORT>/key?v=142         # Headscale
+curl -sI http://<BACKEND_HOST>:<HTTP_PORT>/admin | head -1  # Headplane
 ```
 
-- **Fallan los dos**: el problema está en la máquina de Headscale. Revisa el
-  firewall y `BIND_ADDRESS` en `.env` (con `127.0.0.1` el proxy no llega).
-- **Funcionan pero los dominios públicos no**: el problema está en el proxy.
-  Revisa `reverse-proxy/REVERSE-PROXY.md`; lo más habitual es que falte
+- **Fallan los dos**: el problema está en esta máquina. Revisa el firewall y
+  que Caddy haya arrancado: `docker compose logs caddy`.
+- **Funcionan pero el dominio público no**: el problema está en el proxy.
+  Revisa el snippet de `reverse-proxy/`; lo más habitual es que falte
   *Websockets Support* o el `proxy_read_timeout` largo.
 
 ### Con proxy externo: los nodos se reconectan cada minuto

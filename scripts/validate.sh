@@ -141,8 +141,8 @@ print_info "Verificando .env.example..."
 
 required_vars=(
     "SERVER_URL"
-    "ENABLE_SSL"
     "SSL_MODE"
+    "DOMAIN"
     "TAILNET_NAME"
     "COOKIE_SECRET"
 )

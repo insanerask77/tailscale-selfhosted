@@ -48,14 +48,12 @@ services:
       - headscale-net
 
     ports:
-      # Puerto DERP/STUN (UDP) - DEBE estar expuesto para que los clientes se conecten
+      # Puerto DERP/STUN (UDP) - DEBE estar expuesto para que los clientes se
+      # conecten. Es UDP puro: ningún reverse proxy HTTP puede transportarlo.
       - "${HEADSCALE_DERP_PORT:-3478}:3478/udp"
 
-      # Puerto HTTP API - expuesto solo si ENABLE_SSL=false (descomentar manualmente o usar override)
-      # - "${HEADSCALE_HTTP_PORT:-8080}:8080"
-
-      # Puerto Metrics (opcional, comentado por defecto por seguridad)
-      # - "${HEADSCALE_METRICS_PORT:-9090}:9090"
+      # La API HTTP (8080) y las métricas (9090) NO se publican: sólo las
+      # alcanza Caddy por la red interna de Docker.
 
     environment:
       - TZ=${TZ:-UTC}
@@ -109,9 +107,8 @@ services:
     networks:
       - headscale-net
 
-    # Descomentar ports si ENABLE_SSL=false para exponer directamente
-    # ports:
-    #   - "${HEADPLANE_PORT:-3000}:3000"
+    # Sin 'ports': Headplane no se publica en el host, sólo lo alcanza Caddy
+    # por la red interna de Docker. La UI se sirve en /admin del dominio.
 
     environment:
       - TZ=${TZ:-UTC}
@@ -130,19 +127,27 @@ services:
       - no-new-privileges:true
 
   # ---------------------------------------------------------------------------
-  # CADDY - Reverse Proxy con TLS automático
+  # CADDY - Reverse proxy y (opcionalmente) TLS
   # ---------------------------------------------------------------------------
-  # Solo se activa si ENABLE_SSL=true (profile: ssl)
+  # Arranca SIEMPRE: es quien enruta el único dominio del stack
+  #   /       -> Headscale
+  #   /admin  -> Headplane
+  # Que además termine TLS depende de SSL_MODE en .env; con 'front' o 'none'
+  # sólo hace de reverse proxy por HTTP.
   caddy:
     image: caddy:${CADDY_IMAGE_TAG:-2-alpine}
     container_name: caddy
     restart: unless-stopped
-    profiles:
-      - ssl
 
+    # service_started, no service_healthy: Headplane no tiene healthcheck (su
+    # imagen no trae wget ni curl) y Compose aborta el arranque si se espera
+    # por la salud de un servicio que no la publica. Tampoco hace falta: Caddy
+    # resuelve los upstreams al atender cada petición, no al arrancar.
     depends_on:
+      headscale:
+        condition: service_started
       headplane:
-        condition: service_healthy
+        condition: service_started
 
     volumes:
       # Caddyfile

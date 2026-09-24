@@ -1,0 +1,76 @@
+# =============================================================================
+# ${DOMAIN} - Headscale + Headplane
+# =============================================================================
+# Generado por install.sh. Es configuración DINÁMICA de Traefik: cópiala al
+# directorio que vigila tu file provider (p.ej. /etc/traefik/dynamic/) y
+# Traefik la recargará sin reiniciar.
+#
+# Si aún no tienes file provider, en la configuración estática:
+#
+#   providers:
+#     file:
+#       directory: /etc/traefik/dynamic
+#       watch: true
+#
+# Detrás hay un Caddy que ya enruta por ruta (/ -> Headscale, /admin ->
+# Headplane), así que aquí sólo hay UN servicio: se reenvía el dominio entero.
+#
+# Ajusta 'entryPoints' y 'certResolver' a los nombres que uses tú.
+#
+# OJO con el relay DERP: Headscale escucha STUN en UDP ${HEADSCALE_DERP_PORT} y
+# eso NO pasa por un router HTTP. Abre ese puerto directo contra
+# ${BACKEND_HOST} o desactiva derp.server.enabled y usa los relays públicos de
+# Tailscale. (Traefik puede enrutar UDP con un entryPoint dedicado, pero
+# entonces el cliente ve la IP del proxy y el descubrimiento NAT empeora.)
+
+http:
+  routers:
+    headscale:
+      rule: "Host(`${DOMAIN}`)"
+      entryPoints:
+        - websecure
+      service: headscale
+      middlewares:
+        - headscale-headers
+      tls:
+        certResolver: letsencrypt
+
+    # Redirección de HTTP a HTTPS
+    headscale-http:
+      rule: "Host(`${DOMAIN}`)"
+      entryPoints:
+        - web
+      service: headscale
+      middlewares:
+        - headscale-redirect
+
+  middlewares:
+    headscale-redirect:
+      redirectScheme:
+        scheme: https
+        permanent: true
+
+    headscale-headers:
+      headers:
+        # Traefik ya envía X-Forwarded-{For,Proto,Host,Port} y gestiona el
+        # Upgrade de /ts2021 por su cuenta: aquí sólo se añade seguridad.
+        stsSeconds: 31536000
+        stsIncludeSubdomains: true
+        contentTypeNosniff: true
+        referrerPolicy: "strict-origin-when-cross-origin"
+
+  services:
+    headscale:
+      loadBalancer:
+        servers:
+          - url: "http://${BACKEND_HOST}:${HTTP_PORT}"
+        # /machine/map es un long-poll que empuja los cambios de la red según
+        # ocurren. flushInterval -1 desactiva el buffering de respuesta para
+        # que lleguen sin retraso.
+        responseForwarding:
+          flushInterval: "-1"
+        passHostHeader: true
+
+# El serversTransport por defecto no impone timeout de respuesta, así que el
+# long-poll no se corta. Si tienes uno propio con responseHeaderTimeout o
+# idleConnTimeout bajos, súbelos o no lo apliques a este servicio.

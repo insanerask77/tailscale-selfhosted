@@ -1,0 +1,47 @@
+# =============================================================================
+# ${DOMAIN} - Headscale + Headplane
+# =============================================================================
+# Generado por install.sh. Añade este bloque al Caddyfile del proxy de borde y
+# recarga con:
+#
+#   caddy validate --config /etc/caddy/Caddyfile
+#   systemctl reload caddy
+#
+# Detrás hay otro Caddy que ya enruta por ruta (/ -> Headscale, /admin ->
+# Headplane), así que aquí basta con reenviar el dominio entero.
+#
+# OJO con el relay DERP: Headscale escucha STUN en UDP ${HEADSCALE_DERP_PORT} y
+# eso NO pasa por un reverse proxy HTTP. Abre ese puerto directo contra
+# ${BACKEND_HOST} o desactiva derp.server.enabled y usa los relays públicos de
+# Tailscale.
+
+${DOMAIN} {
+    # HTTPS automático con Let's Encrypt: Caddy lo hace solo en cuanto el
+    # sitio tiene un nombre de dominio, no hace falta ninguna directiva.
+    # Descomenta una de estas sólo si quieres otra cosa:
+    #   tls tu@email.com                   avisos de renovación de Let's Encrypt
+    #   tls /ruta/cert.pem /ruta/key.pem   certificado propio
+    #   tls internal                       CA interna de Caddy
+
+    log {
+        output file /var/log/caddy/${DOMAIN}.access.log
+        format json
+    }
+
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        X-Content-Type-Options "nosniff"
+        Referrer-Policy "strict-origin-when-cross-origin"
+        -Server
+    }
+
+    reverse_proxy ${BACKEND_HOST}:${HTTP_PORT} {
+        header_up X-Real-IP {remote_host}
+
+        # /machine/map es un long-poll que se queda abierto indefinidamente.
+        # Caddy no hace buffering ni impone un read timeout por defecto, así
+        # que no hay nada que ajustar: sólo se sube el flush_interval a -1
+        # para que el streaming salga inmediato.
+        flush_interval -1
+    }
+}

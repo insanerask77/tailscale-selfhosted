@@ -208,18 +208,12 @@ cmd_update() {
         set +a
     fi
 
-    # Determinar profile
-    local compose_args=""
-    if [[ "${ENABLE_SSL:-false}" == "true" ]]; then
-        compose_args="--profile ssl"
-    fi
-
     # Pull de nuevas imágenes
-    docker compose $compose_args pull
+    docker compose pull
 
     # Recrear contenedores
     print_info "Recreando contenedores con nuevas imágenes..."
-    docker compose $compose_args up -d
+    docker compose up -d
 
     print_success "Actualización completada"
 }

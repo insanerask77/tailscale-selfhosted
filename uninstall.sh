@@ -128,22 +128,18 @@ EOF
 stop_services() {
     print_header "DETENIENDO SERVICIOS"
 
-    # Cargar .env si existe para obtener configuración de profiles
+    # Cargar .env si existe (aporta NETWORK_NAME y los puertos que Compose
+    # necesita interpolar para poder leer el fichero)
     if [ -f "$ENV_FILE" ]; then
         set -a
         source "$ENV_FILE"
         set +a
     fi
 
-    # Determinar si SSL está habilitado para usar el profile correcto
-    local compose_args=""
-    if [[ "${ENABLE_SSL:-false}" == "true" ]]; then
-        compose_args="--profile ssl"
-    fi
-
-    # Detener y eliminar contenedores
+    # Detener y eliminar contenedores. Ya no hay profiles: Caddy forma parte
+    # del stack siempre, así que 'down' a secas se lleva todo.
     print_info "Deteniendo contenedores..."
-    if docker compose $compose_args down; then
+    if docker compose down; then
         print_success "Contenedores detenidos y eliminados"
     else
         print_warning "No se pudo detener algunos contenedores (puede que ya estén detenidos)"

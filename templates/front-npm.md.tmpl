@@ -1,0 +1,123 @@
+# Nginx Proxy Manager - ${DOMAIN}
+
+Generado por `install.sh`. Detrás de NPM hay un Caddy que ya enruta por ruta
+(`/` → Headscale, `/admin` → Headplane), así que en NPM hace falta **un solo
+Proxy Host**: se reenvía el dominio entero y Caddy reparte.
+
+URL final: **${HEADSCALE_PUBLIC_URL}** (la interfaz web, en
+`${HEADSCALE_PUBLIC_URL}/admin`).
+
+---
+
+## 1. Antes de empezar
+
+- El DNS de `${DOMAIN}` debe apuntar a **la máquina de NPM**, no a esta.
+- NPM tiene que alcanzar `${BACKEND_HOST}:${HTTP_PORT}`. Compruébalo desde su
+  consola: `curl -s http://${BACKEND_HOST}:${HTTP_PORT}/key?v=142` debe
+  devolver una clave pública.
+
+---
+
+## 2. Crear el Proxy Host
+
+**Hosts → Proxy Hosts → Add Proxy Host**
+
+### Pestaña *Details*
+
+| Campo | Valor |
+|-------|-------|
+| Domain Names | `${DOMAIN}` |
+| Scheme | `http` |
+| Forward Hostname / IP | `${BACKEND_HOST}` |
+| Forward Port | `${HTTP_PORT}` |
+| Cache Assets | ❌ desactivado |
+| Block Common Exploits | ❌ desactivado |
+| **Websockets Support** | ✅ **activado** |
+| Access List | Publicly Accessible |
+
+> **Websockets Support es obligatorio.** `/ts2021`, el protocolo de control de
+> Tailscale, viaja sobre una conexión *upgraded*; sin esa casilla ningún nodo
+> llega a registrarse.
+
+> **Block Common Exploits desactivado**: sus reglas rechazan peticiones con
+> cuerpos binarios y cadenas raras, que es exactamente el tráfico del control
+> plane.
+
+### Pestaña *SSL*
+
+| Campo | Valor |
+|-------|-------|
+| SSL Certificate | Request a new SSL Certificate |
+| Force SSL | ✅ |
+| HTTP/2 Support | ✅ |
+| HSTS Enabled | ✅ |
+| Email / Términos | los tuyos |
+
+### Pestaña *Advanced*
+
+Pega esto tal cual en la caja de configuración:
+
+```nginx
+# /machine/map es un long-poll que se queda abierto indefinidamente para
+# empujar los cambios de la red. Con el read timeout por defecto (60 s) los
+# nodos se reconectarían cada minuto.
+proxy_read_timeout 3600s;
+proxy_send_timeout 3600s;
+
+# Sin buffering: los cambios de red deben llegar según se producen.
+proxy_buffering off;
+proxy_request_buffering off;
+
+# Los mapas de red pueden ser grandes; sin esto, 413.
+client_max_body_size 0;
+
+proxy_set_header X-Real-IP $remote_addr;
+proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+proxy_set_header X-Forwarded-Proto $scheme;
+```
+
+Guarda. NPM pedirá el certificado y recargará solo.
+
+---
+
+## 3. El puerto DERP no pasa por NPM
+
+Headscale expone el relay STUN en **UDP ${HEADSCALE_DERP_PORT}**, y eso es UDP
+puro: ningún reverse proxy HTTP lo transporta. Tienes dos opciones:
+
+1. Abrir UDP `${HEADSCALE_DERP_PORT}` directo contra `${BACKEND_HOST}` en el
+   firewall / router.
+2. Desactivar el relay propio (`derp.server.enabled: false` en
+   `headscale-config.yaml`) y usar los relays públicos de Tailscale.
+
+Sin una de las dos, los nodos conectan pero el tráfico entre ellos puede no
+establecerse cuando ambos están tras NAT.
+
+---
+
+## 4. IP real de los clientes (opcional)
+
+Con NPM delante, Headscale ve la IP de NPM en todas las peticiones. Para que
+registre la del cliente, añade el CIDR de la máquina de NPM en
+`headscale-config.yaml`, junto al rango de Docker que ya está puesto:
+
+```yaml
+trusted_proxies:
+  - 172.16.0.0/12
+  - 192.168.1.50/32   # <- IP de tu NPM
+```
+
+Y reinicia: `docker compose restart headscale`.
+
+---
+
+## 5. Comprobación
+
+```bash
+curl -s ${HEADSCALE_PUBLIC_URL}/key?v=142          # clave pública de Headscale
+curl -sI ${HEADSCALE_PUBLIC_URL}/admin | head -1   # 302 hacia /admin/
+```
+
+Si lo primero falla pero `curl http://${BACKEND_HOST}:${HTTP_PORT}/key?v=142`
+funciona desde la máquina de NPM, el problema está en NPM (casi siempre:
+Websockets Support sin marcar).
