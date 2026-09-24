@@ -1,5 +1,3 @@
-version: '3.8'
-
 # =============================================================================
 # HEADSCALE + HEADPLANE - DOCKER COMPOSE
 # =============================================================================
@@ -16,6 +14,8 @@ volumes:
     name: headscale-data
   headscale-socket:
     name: headscale-socket
+  headplane-data:
+    name: headplane-data
   caddy-data:
     name: caddy-data
   caddy-config:
@@ -29,6 +29,10 @@ services:
     image: headscale/headscale:${HEADSCALE_IMAGE_TAG:-latest}
     container_name: headscale
     restart: unless-stopped
+
+    labels:
+      # Label para que Headplane pueda identificar este contenedor
+      me.tale.headplane.target: "headscale"
 
     volumes:
       # Configuración
@@ -90,11 +94,17 @@ services:
       # Configuración
       - ./headplane-config.yaml:/etc/headplane/config.yaml:ro
 
-      # Socket Unix compartido con Headscale (modo integrated)
+      # Socket Unix compartido con Headscale
       - headscale-socket:/var/run/headscale:ro
 
-      # Config de Headscale (solo lectura, para modo integrated)
+      # Config de Headscale (solo lectura)
       - ./headscale-config.yaml:/etc/headscale/config.yaml:ro
+
+      # Socket de Docker (para integración Docker)
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+
+      # Datos persistentes de Headplane
+      - headplane-data:/var/lib/headplane
 
     networks:
       - headscale-net

@@ -464,10 +464,10 @@ configure_oidc() {
 generate_secrets() {
     print_header "GENERACIÓN DE SECRETOS"
 
-    # Generar COOKIE_SECRET si no existe
+    # Generar COOKIE_SECRET si no existe (exactamente 32 caracteres)
     if [ -z "${COOKIE_SECRET:-}" ]; then
         print_info "Generando COOKIE_SECRET..."
-        COOKIE_SECRET=$(generate_secret 32)
+        COOKIE_SECRET=$(generate_secret 16)  # 16 bytes = 32 caracteres hex
         print_success "COOKIE_SECRET generado"
     else
         print_info "COOKIE_SECRET existente detectado, reutilizando"
@@ -584,10 +584,27 @@ EOFC
 generate_headplane_config() {
     print_header "GENERANDO CONFIGURACIÓN DE HEADPLANE"
 
+    # Generar bloque OIDC si está habilitado
+    if [[ "$ENABLE_OIDC" == "true" ]]; then
+        OIDC_CONFIG_BLOCK=$(cat <<EOFC
+oidc:
+  enabled: true
+  issuer: "${OIDC_ISSUER_URL}"
+  client_id: "${OIDC_CLIENT_ID}"
+  client_secret: "${OIDC_CLIENT_SECRET}"
+  scope: "${OIDC_SCOPE}"
+  use_pkce: true
+  disable_api_key_login: false
+  profile_picture_source: "gravatar"
+  default_role: "member"
+EOFC
+        )
+    else
+        OIDC_CONFIG_BLOCK="# OIDC disabled"
+    fi
+
     # Cargar plantilla y sustituir variables
-    export INTEGRATION_MODE COOKIE_SECRET SESSION_SECURE AUTH_TYPE \
-           ENABLE_OIDC OIDC_ISSUER_URL OIDC_CLIENT_ID OIDC_CLIENT_SECRET \
-           OIDC_SCOPE OIDC_EMAIL_CLAIM LOG_LEVEL TAILNET_NAME SERVER_URL
+    export COOKIE_SECRET SESSION_SECURE SERVER_URL HEADSCALE_HTTP_PORT OIDC_CONFIG_BLOCK
 
     envsubst < "$TEMPLATES_DIR/headplane-config.yaml.tmpl" > "$SCRIPT_DIR/headplane-config.yaml"
 
@@ -644,8 +661,6 @@ generate_compose_override() {
     cat > "$SCRIPT_DIR/docker-compose.override.yml" <<'EOF'
 # Docker Compose Override - Generado automáticamente por install.sh
 # Este archivo se usa cuando ENABLE_SSL=false para exponer puertos directamente
-
-version: '3.8'
 
 services:
   headscale:
