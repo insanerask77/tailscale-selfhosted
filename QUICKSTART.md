@@ -55,13 +55,21 @@ http://vpn.midominio.com:3000/admin      # sin proxy
 ### 2. Generar Clave de Conexión
 
 ```bash
+./scripts/utils.sh preauth:create admin
+```
+
+O directamente, teniendo en cuenta que desde Headscale 0.29 `--user` espera el
+**ID numérico** del usuario, no su nombre:
+
+```bash
+docker exec headscale headscale users list     # busca el ID de 'admin'
 docker exec headscale headscale preauthkeys create \
-  --user admin \
+  --user 1 \
   --reusable \
   --expiration 24h
 ```
 
-Copia la clave que se muestra (algo como `1a2b3c4d...`).
+Copia la clave que se muestra (empieza por `hskey-auth-`).
 
 ### 3. Conectar un Dispositivo
 
@@ -161,6 +169,22 @@ docker compose ps  # Verifica que estén "healthy"
 ```bash
 ./install.sh  # Re-ejecutar y elegir "autofirmado"
 ```
+
+### Error 500 `auth ID has invalid length: expected 38, got 101`
+
+**Causa**: has pegado la **API key** (la del login, `hskey-api-…`, 87 caracteres)
+en el diálogo *Register Machine Key* de Headplane. Ese campo sólo acepta el
+**Auth ID** de 38 caracteres.
+
+**Solución**: lanza `tailscale up` **sin** `--authkey` en el dispositivo:
+
+```bash
+tailscale up --login-server=https://vpn.midominio.com
+# -> To authenticate, visit: .../register/hskey-authreq-XXXXXXXXXXXXXXXXXXXXXXXX
+```
+
+Pega en Headplane sólo el `hskey-authreq-…`. O sáltate la UI por completo usando
+una pre-auth key con `--authkey` (paso 2 de arriba).
 
 ### Los dispositivos no se conectan entre sí
 

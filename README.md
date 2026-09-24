@@ -216,10 +216,16 @@ momento de crearla.
 
 2. **Generar una clave de pre-autenticación**:
    ```bash
+   # Ojo: desde Headscale 0.29 --user espera el ID numérico, no el nombre
+   docker exec headscale headscale users list      # busca el ID de 'admin'
    docker exec headscale headscale preauthkeys create \
-     --user admin \
+     --user 1 \
      --reusable \
      --expiration 24h
+   ```
+   El helper acepta el nombre y resuelve el ID por ti:
+   ```bash
+   ./scripts/utils.sh preauth:create admin
    ```
 
 3. **Conectar un dispositivo**:
@@ -227,6 +233,30 @@ momento de crearla.
    # En tu dispositivo con Tailscale instalado
    tailscale up --login-server=https://vpn.midominio.com --authkey=<tu-clave>
    ```
+
+### Las tres claves del stack (no las confundas)
+
+Los tres tipos de clave empiezan por `hskey-` y es fácil pegar la que no toca.
+Hacerlo produce un error 500 confuso del tipo
+`auth ID has invalid length: expected 38, got 101`.
+
+| Clave | Prefijo | Longitud | Para qué sirve |
+|---|---|---|---|
+| **API key** | `hskey-api-…` | 87 | Iniciar sesión en la UI de Headplane |
+| **Pre-auth key** | `hskey-auth-…` | 88 | `tailscale up --authkey=…` |
+| **Auth ID** | `hskey-authreq-…` | 38 | Lo único que acepta el diálogo *Register Machine Key* de Headplane |
+
+El **Auth ID** no se genera con ningún comando: lo imprime `tailscale up` cuando
+lo lanzas **sin** `--authkey`:
+
+```bash
+tailscale up --login-server=https://vpn.midominio.com
+# -> To authenticate, visit: https://vpn.midominio.com/register/hskey-authreq-XXXXXXXXXXXXXXXXXXXXXXXX
+```
+
+Esa última parte (`hskey-authreq-…`, 38 caracteres) es lo que se pega en
+Headplane. Si pegas la API key, Headplane le antepone `hskey-authreq-` por su
+cuenta y Headscale rechaza la petición: 87 + 14 = 101 caracteres.
 
 ### Dos URLs distintas: control plane e interfaz web
 

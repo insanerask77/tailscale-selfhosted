@@ -107,9 +107,23 @@ cmd_preauthkey_create() {
         read -p "$(echo -e "${CYAN}?${NC} Usuario: ")" user
     fi
 
-    print_info "Generando clave de pre-autenticación para $user..."
+    # Headscale 0.29 exige el ID numérico en --user. Se acepta un nombre por
+    # comodidad y se resuelve aquí; si ya es un número se usa tal cual.
+    local user_id="$user"
+    if [[ ! "$user" =~ ^[0-9]+$ ]]; then
+        user_id=$(docker exec headscale headscale users list --output json 2>/dev/null \
+                  | tr -d ' \t\n' \
+                  | grep -oE "\"id\":[0-9]+,\"name\":\"${user}\"" \
+                  | grep -oE '[0-9]+' | head -1)
+        if [[ -z "$user_id" ]]; then
+            print_error "No existe el usuario '$user'"
+            return 1
+        fi
+    fi
 
-    local cmd="docker exec headscale headscale preauthkeys create --user $user --expiration $expiration"
+    print_info "Generando clave de pre-autenticación para $user (ID $user_id)..."
+
+    local cmd="docker exec headscale headscale preauthkeys create --user $user_id --expiration $expiration"
 
     if [[ "$reusable" == "true" ]]; then
         cmd="$cmd --reusable"
@@ -302,7 +316,7 @@ ${CYAN}Gestión de Headscale:${NC}
                           - Crear clave de pre-autenticación
                             Ejemplos:
                               utils.sh preauth:create admin
-                              utils.sh preauth:create admin true 7d
+                              utils.sh preauth:create admin true 7d   (acepta nombre o ID)
 
   apikey:create [expiration]
                           - Crear API key para iniciar sesión en Headplane

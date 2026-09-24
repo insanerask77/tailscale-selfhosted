@@ -71,7 +71,12 @@ database:
 
 # Policy (ACL)
 policy:
-  # Path al archivo de ACL policy (vacío = política permisiva por defecto)
+  # "database" guarda las ACL en la BD y permite editarlas desde Headplane.
+  # Con "file" (y path vacío) GET /api/v1/policy devuelve 500 y SetPolicy está
+  # deshabilitado, así que el editor de ACL de la UI no funciona.
+  mode: database
+
+  # Sólo se usa si mode es "file": ruta a un fichero HuJSON con las políticas.
   path: ""
 
 # DNS configuration

@@ -833,6 +833,14 @@ bootstrap_headscale() {
         fi
     fi
 
+    # Headscale 0.29 exige el ID numérico en 'preauthkeys create --user',
+    # no el nombre, así que hay que resolverlo para poder mostrar el comando.
+    ADMIN_USER_ID=$(docker exec headscale headscale users list --output json 2>/dev/null \
+                    | tr -d ' \t\n' \
+                    | grep -oE "\"id\":[0-9]+,\"name\":\"${ADMIN_USER}\"" \
+                    | grep -oE '[0-9]+' | head -1)
+    [[ -z "$ADMIN_USER_ID" ]] && ADMIN_USER_ID="<id>"
+
     # --- API key ---
     # Headscale sólo devuelve el valor completo al crearla; después almacena
     # únicamente el prefijo. Si conservamos una en .env y sigue vigente, se
@@ -969,10 +977,17 @@ show_access_info() {
     echo -e "   ${YELLOW}(la UI vive bajo /admin; la raíz / devuelve 404)${NC}"
     echo ""
     echo "2. Generar una clave de pre-autenticación para conectar dispositivos:"
-    echo -e "   ${YELLOW}docker exec headscale headscale preauthkeys create --user ${ADMIN_USER} --reusable --expiration 24h${NC}"
+    echo -e "   ${YELLOW}docker exec headscale headscale preauthkeys create --user ${ADMIN_USER_ID} --reusable --expiration 24h${NC}"
+    echo -e "   ${YELLOW}(--user espera el ID numérico del usuario, no su nombre)${NC}"
     echo ""
     echo "3. Conectar un dispositivo con Tailscale:"
-    echo -e "   ${YELLOW}tailscale up --login-server=${HEADSCALE_PUBLIC_URL} --authkey=<tu-clave>${NC}"
+    echo -e "   ${YELLOW}tailscale up --login-server=${HEADSCALE_PUBLIC_URL} --authkey=<clave-del-paso-2>${NC}"
+    echo ""
+    print_warning "No confundas las tres claves de este stack:"
+    echo -e "   • ${BOLD}API key${NC} (hskey-api-...)      -> iniciar sesión en la UI de Headplane"
+    echo -e "   • ${BOLD}Pre-auth key${NC} (hskey-auth-...) -> registrar dispositivos con --authkey"
+    echo -e "   • ${BOLD}Auth ID${NC} (hskey-authreq-...)   -> lo imprime 'tailscale up' sin --authkey,"
+    echo -e "     y es lo único que acepta el diálogo \"Register Machine Key\" de Headplane"
     echo ""
 
     echo -e "${CYAN}${BOLD}Comandos útiles:${NC}"
