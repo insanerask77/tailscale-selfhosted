@@ -1,1 +1,764 @@
-# tailscale-selfhosted
+# Headscale + Headplane - Despliegue Todo-en-Uno
+
+<div align="center">
+
+![Headscale](https://img.shields.io/badge/Headscale-Latest-blue?logo=tailscale)
+![Headplane](https://img.shields.io/badge/Headplane-Latest-green)
+![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker)
+![License](https://img.shields.io/badge/License-MIT-yellow)
+
+**Solución de despliegue automatizado para Headscale (control plane self-hosted compatible con Tailscale) + Headplane (UI web moderna)**
+
+[Instalación Rápida](#-instalación-rápida) • [Características](#-características) • [Configuración](#-configuración) • [Uso](#-uso) • [Troubleshooting](#-troubleshooting)
+
+</div>
+
+---
+
+## 📋 Tabla de Contenidos
+
+- [Acerca del Proyecto](#-acerca-del-proyecto)
+- [Características](#-características)
+- [Requisitos](#-requisitos)
+- [Instalación Rápida](#-instalación-rápida)
+- [Configuración](#-configuración)
+- [Uso](#-uso)
+- [Arquitectura](#-arquitectura)
+- [Reconfiguración](#-reconfiguración)
+- [Backup y Restauración](#-backup-y-restauración)
+- [Troubleshooting](#-troubleshooting)
+- [Desinstalación](#-desinstalación)
+- [Contribuir](#-contribuir)
+- [Licencia](#-licencia)
+
+---
+
+## 🎯 Acerca del Proyecto
+
+Este proyecto proporciona un **instalador interactivo todo-en-uno** que despliega:
+
+- **[Headscale](https://github.com/juanfont/headscale)**: Control plane open-source compatible con Tailscale
+- **[Headplane](https://github.com/tale/headplane)**: Interfaz web moderna para gestionar Headscale
+- **[Caddy](https://caddyserver.com/)** (opcional): Reverse proxy con TLS automático
+
+Todo funcional con **un solo comando** (`./install.sh`), sin necesidad de editar archivos de configuración manualmente.
+
+### ¿Por qué usar esto?
+
+✅ **Cero configuración manual**: El instalador te guía paso a paso  
+✅ **SSL automático**: Certificados Let's Encrypt o autofirmados  
+✅ **OIDC integrado**: Autenticación con Keycloak, Authentik, etc.  
+✅ **Idempotente**: Puedes reconfigurar sin perder datos  
+✅ **Producción ready**: Configuración segura por defecto  
+
+---
+
+## ✨ Características
+
+### 🚀 Instalación
+
+- ✅ Instalador interactivo en bash puro (sin dependencias adicionales)
+- ✅ Detección automática de distribución Linux (Debian/Ubuntu, Fedora/RHEL, Arch)
+- ✅ Instalación automática de Docker si no está presente
+- ✅ Validación de inputs con valores por defecto sensatos
+- ✅ Generación automática de secretos criptográficos
+- ✅ Idempotente: ejecutar múltiples veces es seguro
+
+### 🔐 Seguridad
+
+- ✅ SSL/TLS con Let's Encrypt (certificado automático)
+- ✅ Certificado autofirmado para redes privadas
+- ✅ Headers de seguridad (HSTS, X-Frame-Options, etc.)
+- ✅ Secretos generados automáticamente (nunca hardcodeados)
+- ✅ Autenticación OIDC opcional (Keycloak, Authentik, etc.)
+- ✅ Contenedores con mínimos privilegios (cap_drop, security_opt)
+
+### 🎨 Interfaz
+
+- ✅ UI web moderna (Headplane) para gestionar Headscale
+- ✅ Modo integrado: acceso completo a todas las funciones de Headscale
+- ✅ Gestión de usuarios, nodos, rutas, ACLs desde la web
+- ✅ Tema claro/oscuro automático
+
+### 🛠️ Operación
+
+- ✅ Docker Compose v2 (última versión)
+- ✅ Healthchecks para todos los servicios
+- ✅ Logs estructurados en JSON
+- ✅ Volúmenes persistentes para datos críticos
+- ✅ Reinicio automático de contenedores
+- ✅ Desinstalador con opción de purga total
+
+---
+
+## 📦 Requisitos
+
+### Mínimos
+
+- **Sistema Operativo**: Linux (Debian/Ubuntu, Fedora/RHEL, Arch, o cualquier distro con Docker)
+- **Docker**: >= 20.10 (se instala automáticamente si falta)
+- **Docker Compose**: plugin v2 (se instala con Docker)
+- **RAM**: >= 1GB
+- **Disco**: >= 2GB libres
+- **Puertos**:
+  - `80/tcp` y `443/tcp` (si SSL habilitado)
+  - `3000/tcp` (si SSL deshabilitado)
+  - `3478/udp` (DERP/STUN, debe ser accesible externamente)
+
+### Recomendados
+
+- **Dominio**: con DNS apuntando al servidor (para Let's Encrypt)
+- **RAM**: >= 2GB
+- **CPU**: >= 2 cores
+
+### Opcional
+
+- **OIDC Provider**: Keycloak, Authentik, Auth0, etc. (para autenticación centralizada)
+
+---
+
+## 🚀 Instalación Rápida
+
+### Opción 1: Instalación Interactiva (Recomendada)
+
+```bash
+# 1. Clonar el repositorio
+git clone https://github.com/tu-usuario/tailscale-selfhosted.git
+cd tailscale-selfhosted
+
+# 2. Ejecutar el instalador interactivo
+./install.sh
+
+# 3. ¡Listo! Accede a la URL mostrada al final
+```
+
+El instalador te preguntará:
+- Dominio o IP de acceso
+- ¿Habilitar SSL? (con Let's Encrypt o certificado autofirmado)
+- Puertos a usar (con defaults razonables)
+- Nombre de tu organización/tailnet
+- ¿Integrar OIDC? (opcional)
+
+Al finalizar, los servicios estarán corriendo y listos para usar.
+
+### Opción 2: Instalación Silenciosa (Avanzada)
+
+Si prefieres configurar manualmente:
+
+```bash
+# 1. Clonar el repositorio
+git clone https://github.com/tu-usuario/tailscale-selfhosted.git
+cd tailscale-selfhosted
+
+# 2. Copiar y editar el archivo de configuración
+cp .env.example .env
+nano .env
+
+# 3. Generar configuraciones
+export $(cat .env | xargs)
+envsubst < templates/headscale-config.yaml.tmpl > headscale-config.yaml
+envsubst < templates/headplane-config.yaml.tmpl > headplane-config.yaml
+envsubst < templates/Caddyfile.tmpl > Caddyfile  # Si SSL habilitado
+
+# 4. Levantar los servicios
+docker compose --profile ssl up -d  # Con SSL
+# O
+docker compose up -d  # Sin SSL
+```
+
+---
+
+## ⚙️ Configuración
+
+### Variables de Entorno Principales
+
+El archivo `.env` (generado por `install.sh`) contiene todas las configuraciones:
+
+| Variable | Descripción | Ejemplo |
+|----------|-------------|---------|
+| `SERVER_URL` | URL pública del servidor | `https://vpn.midominio.com` |
+| `ENABLE_SSL` | Habilitar SSL/TLS | `true` o `false` |
+| `SSL_MODE` | Modo SSL | `letsencrypt` o `selfsigned` |
+| `ACME_EMAIL` | Email para Let's Encrypt | `admin@midominio.com` |
+| `TAILNET_NAME` | Nombre de la organización | `myorg` |
+| `ENABLE_OIDC` | Habilitar autenticación OIDC | `true` o `false` |
+| `OIDC_ISSUER_URL` | URL del proveedor OIDC | `https://auth.example.com/realms/master` |
+
+Ver [.env.example](.env.example) para la lista completa de variables.
+
+### Puertos Utilizados
+
+| Puerto | Protocolo | Servicio | Descripción |
+|--------|-----------|----------|-------------|
+| 80 | TCP | Caddy | HTTP (redirección a HTTPS) |
+| 443 | TCP/UDP | Caddy | HTTPS / HTTP/3 |
+| 3000 | TCP | Headplane | Web UI (interno si SSL, expuesto si no) |
+| 3478 | UDP | Headscale | DERP/STUN (debe ser accesible) |
+| 8080 | TCP | Headscale | API HTTP (interno) |
+| 50443 | TCP | Headscale | gRPC (interno) |
+| 9090 | TCP | Headscale | Metrics (interno, opcional) |
+
+---
+
+## 📖 Uso
+
+### Primeros Pasos
+
+1. **Acceder a la UI web**:
+   ```
+   Abre en tu navegador: https://vpn.midominio.com
+   ```
+
+2. **Crear un usuario administrador**:
+   ```bash
+   docker exec headscale headscale users create admin
+   ```
+
+3. **Generar una clave de pre-autenticación**:
+   ```bash
+   docker exec headscale headscale preauthkeys create \
+     --user admin \
+     --reusable \
+     --expiration 24h
+   ```
+
+4. **Conectar un dispositivo**:
+   ```bash
+   # En tu dispositivo con Tailscale instalado
+   tailscale up --login-server=https://vpn.midominio.com --authkey=<tu-clave>
+   ```
+
+### Gestión de Usuarios
+
+```bash
+# Listar usuarios
+docker exec headscale headscale users list
+
+# Crear usuario
+docker exec headscale headscale users create <nombre>
+
+# Eliminar usuario
+docker exec headscale headscale users destroy <nombre>
+```
+
+### Gestión de Nodos
+
+```bash
+# Listar nodos
+docker exec headscale headscale nodes list
+
+# Listar nodos de un usuario
+docker exec headscale headscale nodes list --user admin
+
+# Eliminar nodo
+docker exec headscale headscale nodes delete --identifier <id>
+
+# Expirar nodo
+docker exec headscale headscale nodes expire --identifier <id>
+```
+
+### Gestión de Rutas
+
+```bash
+# Listar rutas
+docker exec headscale headscale routes list
+
+# Aprobar ruta
+docker exec headscale headscale routes enable --route <id>
+
+# Desaprobar ruta
+docker exec headscale headscale routes disable --route <id>
+```
+
+### Ver Logs
+
+```bash
+# Todos los servicios
+docker compose logs -f
+
+# Solo Headscale
+docker compose logs -f headscale
+
+# Solo Headplane
+docker compose logs -f headplane
+
+# Solo Caddy
+docker compose logs -f caddy
+```
+
+### Estado de Servicios
+
+```bash
+# Ver estado
+docker compose ps
+
+# Reiniciar servicios
+docker compose restart
+
+# Detener servicios
+docker compose down
+
+# Iniciar servicios
+docker compose up -d
+```
+
+---
+
+## 🏗️ Arquitectura
+
+### Diagrama de Flujo
+
+```
+Internet
+    │
+    │ HTTPS (443)
+    ├─────────────────────┐
+    │                     │
+    │                     │ UDP (3478)
+    │                     │ DERP/STUN
+    ▼                     ▼
+┌─────────┐         ┌──────────────┐
+│  Caddy  │         │  Headscale   │
+│ (Proxy) │────────▶│(Control Plane)│
+└─────────┘         └──────────────┘
+    │                     ▲
+    │ HTTP (3000)         │ Unix Socket
+    ▼                     │
+┌─────────┐               │
+│Headplane│───────────────┘
+│ (Web UI)│  (Modo Integrated)
+└─────────┘
+```
+
+### Componentes
+
+1. **Headscale**: Control plane que gestiona la red mesh
+   - Asigna IPs a los nodos
+   - Gestiona ACLs y rutas
+   - Proporciona servidor DERP embebido
+   - Expone API gRPC para gestión
+
+2. **Headplane**: Interfaz web moderna
+   - Modo integrado: acceso directo al socket Unix de Headscale
+   - Gestión completa de usuarios, nodos, rutas, ACLs
+   - Autenticación local u OIDC
+
+3. **Caddy**: Reverse proxy (opcional, solo si SSL habilitado)
+   - Gestión automática de certificados Let's Encrypt
+   - Redirección HTTP → HTTPS
+   - Headers de seguridad
+   - Proxy a Headplane
+
+### Volúmenes
+
+```
+headscale-data/          → Base de datos SQLite y claves de Headscale
+headscale-socket/        → Socket Unix para comunicación Headscale ↔ Headplane
+caddy-data/              → Certificados SSL (Let's Encrypt)
+caddy-config/            → Configuración persistente de Caddy
+data/caddy-logs/         → Logs de acceso de Caddy
+```
+
+---
+
+## 🔄 Reconfiguración
+
+Para cambiar la configuración después de la instalación:
+
+### Método 1: Re-ejecutar el Instalador
+
+```bash
+./install.sh
+```
+
+El instalador detectará la instalación existente y te permitirá reconfigurar sin perder datos.
+
+### Método 2: Editar Manualmente
+
+```bash
+# 1. Editar variables de entorno
+nano .env
+
+# 2. Regenerar configuraciones (si cambiaste variables que afectan a los .yaml)
+export $(cat .env | xargs)
+envsubst < templates/headscale-config.yaml.tmpl > headscale-config.yaml
+envsubst < templates/headplane-config.yaml.tmpl > headplane-config.yaml
+
+# 3. Reiniciar servicios
+docker compose down
+docker compose --profile ssl up -d  # Ajustar según SSL
+```
+
+### Cambiar de HTTP a HTTPS
+
+```bash
+# Opción 1: Re-ejecutar instalador
+./install.sh
+
+# Opción 2: Manual
+# 1. Editar .env
+ENABLE_SSL=true
+SSL_MODE=letsencrypt
+ACME_EMAIL=tu@email.com
+SERVER_URL=https://tu-dominio.com
+
+# 2. Regenerar Caddyfile
+envsubst < templates/Caddyfile.tmpl > Caddyfile
+
+# 3. Reiniciar con profile SSL
+docker compose down
+docker compose --profile ssl up -d
+```
+
+---
+
+## 💾 Backup y Restauración
+
+### ¿Qué Respaldar?
+
+Es crítico respaldar:
+
+1. **Base de datos de Headscale** (contiene usuarios, nodos, rutas):
+   - `data/` (directorio completo)
+   - O volumen Docker: `headscale-data`
+
+2. **Configuraciones**:
+   - `.env`
+   - `headscale-config.yaml`
+   - `headplane-config.yaml`
+
+3. **Certificados SSL** (opcional, se regeneran automáticamente):
+   - Volumen Docker: `caddy-data`
+
+### Crear Backup
+
+```bash
+# Método 1: Backup de directorios locales
+tar -czf headscale-backup-$(date +%Y%m%d).tar.gz \
+  .env \
+  headscale-config.yaml \
+  headplane-config.yaml \
+  data/
+
+# Método 2: Backup de volúmenes Docker
+docker run --rm \
+  -v headscale-data:/data \
+  -v $(pwd):/backup \
+  alpine tar czf /backup/headscale-data-backup-$(date +%Y%m%d).tar.gz -C /data .
+```
+
+### Restaurar Backup
+
+```bash
+# 1. Detener servicios
+docker compose down
+
+# 2. Restaurar archivos
+tar -xzf headscale-backup-YYYYMMDD.tar.gz
+
+# 3. Restaurar volumen (si usaste método 2)
+docker run --rm \
+  -v headscale-data:/data \
+  -v $(pwd):/backup \
+  alpine sh -c "cd /data && tar xzf /backup/headscale-data-backup-YYYYMMDD.tar.gz"
+
+# 4. Reiniciar servicios
+docker compose --profile ssl up -d
+```
+
+### Automatizar Backups
+
+Crear un cron job:
+
+```bash
+# Editar crontab
+crontab -e
+
+# Agregar backup diario a las 2 AM
+0 2 * * * cd /ruta/a/tailscale-selfhosted && tar -czf /backups/headscale-backup-$(date +\%Y\%m\%d).tar.gz .env *.yaml data/
+```
+
+---
+
+## 🔧 Troubleshooting
+
+### Los servicios no inician
+
+**Síntoma**: `docker compose ps` muestra contenedores detenidos o en estado "unhealthy"
+
+**Solución**:
+```bash
+# Ver logs de todos los servicios
+docker compose logs -f
+
+# Ver logs de un servicio específico
+docker compose logs -f headscale
+
+# Verificar healthcheck
+docker inspect headscale | grep -A 20 Health
+```
+
+### Puerto UDP 3478 bloqueado
+
+**Síntoma**: Los clientes no pueden conectarse entre sí (solo al servidor)
+
+**Verificación**:
+```bash
+# Verificar que el puerto está abierto
+sudo netstat -unl | grep 3478
+
+# Verificar firewall
+sudo ufw status  # Ubuntu/Debian
+sudo firewall-cmd --list-all  # Fedora/RHEL
+```
+
+**Solución**:
+```bash
+# Ubuntu/Debian
+sudo ufw allow 3478/udp
+
+# Fedora/RHEL
+sudo firewall-cmd --permanent --add-port=3478/udp
+sudo firewall-cmd --reload
+
+# iptables directo
+sudo iptables -A INPUT -p udp --dport 3478 -j ACCEPT
+```
+
+### Let's Encrypt falla (DNS no propagado)
+
+**Síntoma**: Caddy no puede obtener certificado, logs muestran error ACME
+
+**Verificación**:
+```bash
+# Verificar que el DNS apunta correctamente
+nslookup vpn.midominio.com
+
+# Verificar que los puertos 80/443 son accesibles desde internet
+# (desde otra máquina)
+curl -I http://vpn.midominio.com
+```
+
+**Solución**:
+```bash
+# Opción 1: Esperar a que el DNS se propague (puede tomar hasta 48h)
+# Caddy reintentará automáticamente
+
+# Opción 2: Usar certificado autofirmado temporalmente
+# Editar .env
+SSL_MODE=selfsigned
+
+# Regenerar Caddyfile y reiniciar
+envsubst < templates/Caddyfile.tmpl > Caddyfile
+docker compose restart caddy
+```
+
+### Headplane muestra "Connection refused"
+
+**Síntoma**: Al acceder a la UI, aparece error de conexión
+
+**Verificación**:
+```bash
+# Verificar que headscale está corriendo y healthy
+docker compose ps headscale
+
+# Verificar que el socket Unix existe
+docker exec headplane ls -la /var/run/headscale/
+
+# Verificar permisos del socket
+docker exec headscale ls -la /var/run/headscale/headscale.sock
+```
+
+**Solución**:
+```bash
+# Reiniciar servicios en orden
+docker compose restart headscale
+sleep 10
+docker compose restart headplane
+```
+
+### Error de permisos en socket Unix
+
+**Síntoma**: Headplane no puede conectarse a Headscale, error de permisos en logs
+
+**Solución**:
+```bash
+# Verificar configuración de permisos en headscale-config.yaml
+# Debe tener:
+# unix_socket_permission: "0770"
+
+# Reiniciar Headscale
+docker compose restart headscale
+```
+
+### Certificado autofirmado no es confiable
+
+**Síntoma**: El navegador muestra advertencia de seguridad con certificado autofirmado
+
+**Solución**:
+
+Esto es **normal** con certificados autofirmados. Tienes 3 opciones:
+
+1. **Aceptar la advertencia** (seguro en redes privadas):
+   - Chrome/Edge: Clic en "Avanzado" → "Continuar"
+   - Firefox: Clic en "Avanzado" → "Aceptar el riesgo"
+
+2. **Instalar el certificado en tu sistema**:
+   ```bash
+   # Obtener certificado
+   docker exec caddy cat /data/caddy/certificates/acme-v02.api.letsencrypt.org-directory/vpn.midominio.com/vpn.midominio.com.crt > cert.crt
+   
+   # Instalar (varía según SO)
+   # Ubuntu/Debian:
+   sudo cp cert.crt /usr/local/share/ca-certificates/
+   sudo update-ca-certificates
+   
+   # Firefox: Importar manualmente en Settings → Certificates
+   ```
+
+3. **Usar Let's Encrypt** (requiere dominio válido):
+   ```bash
+   ./install.sh  # Re-ejecutar y elegir Let's Encrypt
+   ```
+
+### Base de datos corrupta
+
+**Síntoma**: Headscale no inicia, logs muestran error de SQLite
+
+**Solución**:
+```bash
+# 1. Detener servicios
+docker compose down
+
+# 2. Hacer backup de la BD actual
+docker run --rm \
+  -v headscale-data:/data \
+  -v $(pwd):/backup \
+  alpine cp /data/db.sqlite /backup/db.sqlite.backup
+
+# 3. Intentar reparar
+docker run --rm \
+  -v headscale-data:/data \
+  alpine sh -c "cd /data && sqlite3 db.sqlite 'PRAGMA integrity_check;'"
+
+# 4. Si falla, restaurar desde backup
+# (o empezar de cero, perdiendo datos)
+
+# 5. Reiniciar
+docker compose up -d
+```
+
+### Los clientes no pueden comunicarse entre sí
+
+**Síntoma**: Los clientes se conectan a Headscale pero no pueden hacer ping entre ellos
+
+**Verificación**:
+```bash
+# 1. Verificar que los nodos están registrados
+docker exec headscale headscale nodes list
+
+# 2. Verificar rutas
+docker exec headscale headscale routes list
+
+# 3. Verificar ACLs (si están configuradas)
+```
+
+**Solución**:
+```bash
+# 1. Verificar que no hay ACLs bloqueando
+# Editar headscale-config.yaml si es necesario
+
+# 2. Verificar que el servidor DERP está funcionando
+# Ver logs de headscale
+docker compose logs -f headscale | grep DERP
+
+# 3. Verificar que el puerto UDP 3478 está accesible (ver arriba)
+```
+
+---
+
+## 🗑️ Desinstalación
+
+### Detener servicios sin eliminar datos
+
+```bash
+docker compose down
+```
+
+### Desinstalación completa
+
+```bash
+# Ejecutar script de desinstalación
+./uninstall.sh
+
+# Responder 'yes' a la confirmación
+```
+
+### Desinstalación con purga total de datos
+
+```bash
+# Elimina también volúmenes, configuraciones y datos
+./uninstall.sh --purge
+
+# ⚠️ ADVERTENCIA: Esto es IRREVERSIBLE
+```
+
+---
+
+## 🤝 Contribuir
+
+Las contribuciones son bienvenidas. Para contribuir:
+
+1. Fork el proyecto
+2. Crea una rama para tu feature (`git checkout -b feature/AmazingFeature`)
+3. Commit tus cambios (`git commit -m 'Add some AmazingFeature'`)
+4. Push a la rama (`git push origin feature/AmazingFeature`)
+5. Abre un Pull Request
+
+### Roadmap
+
+- [ ] Soporte para PostgreSQL como base de datos
+- [ ] Script de migración desde instalaciones manuales
+- [ ] Dashboard de monitoreo (Prometheus + Grafana)
+- [ ] Soporte para alta disponibilidad (HA)
+- [ ] Integración con más proveedores OIDC
+- [ ] Script de actualización automática de versiones
+
+---
+
+## 📄 Licencia
+
+Este proyecto está bajo la Licencia MIT. Ver el archivo [LICENSE](LICENSE) para más detalles.
+
+---
+
+## 🙏 Agradecimientos
+
+- [Headscale](https://github.com/juanfont/headscale) - Control plane open-source
+- [Headplane](https://github.com/tale/headplane) - UI web moderna
+- [Tailscale](https://tailscale.com/) - Por crear el protocolo WireGuard mesh
+- [Caddy](https://caddyserver.com/) - Servidor web con HTTPS automático
+
+---
+
+## 📞 Soporte
+
+Si tienes problemas:
+
+1. Revisa la sección [Troubleshooting](#-troubleshooting)
+2. Busca en [Issues](https://github.com/tu-usuario/tailscale-selfhosted/issues) existentes
+3. Abre un [nuevo Issue](https://github.com/tu-usuario/tailscale-selfhosted/issues/new) con:
+   - Descripción del problema
+   - Output de `docker compose logs`
+   - Output de `docker compose ps`
+   - Tu archivo `.env` (sin secretos)
+
+---
+
+<div align="center">
+
+**[⬆ Volver arriba](#headscale--headplane---despliegue-todo-en-uno)**
+
+Hecho con ❤️ para la comunidad open-source
+
+</div>

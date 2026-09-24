@@ -1,0 +1,26 @@
+# Environment files
+.env
+.env.local
+
+# Data directories
+data/
+config/
+
+# Generated configs
+headscale-config.yaml
+headplane-config.yaml
+Caddyfile
+
+# Logs
+*.log
+
+# Docker
+docker-compose.override.yml  # Generado automáticamente por install.sh
+
+# Backup files
+*.bak
+*.backup
+
+# OS files
+.DS_Store
+Thumbs.db

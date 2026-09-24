@@ -1,0 +1,169 @@
+version: '3.8'
+
+# =============================================================================
+# HEADSCALE + HEADPLANE - DOCKER COMPOSE
+# =============================================================================
+# Configuración generada/actualizada por install.sh
+# Para reconfigurar: ejecuta ./install.sh o edita .env y docker compose up -d
+
+networks:
+  headscale-net:
+    driver: bridge
+    name: ${NETWORK_NAME:-headscale-net}
+
+volumes:
+  headscale-data:
+    name: headscale-data
+  headscale-socket:
+    name: headscale-socket
+  caddy-data:
+    name: caddy-data
+  caddy-config:
+    name: caddy-config
+
+services:
+  # ---------------------------------------------------------------------------
+  # HEADSCALE - Control Plane
+  # ---------------------------------------------------------------------------
+  headscale:
+    image: headscale/headscale:${HEADSCALE_IMAGE_TAG:-latest}
+    container_name: headscale
+    restart: unless-stopped
+
+    volumes:
+      # Configuración
+      - ./headscale-config.yaml:/etc/headscale/config.yaml:ro
+
+      # Datos persistentes
+      - headscale-data:/var/lib/headscale
+
+      # Socket Unix para comunicación con Headplane
+      - headscale-socket:/var/run/headscale
+
+    networks:
+      - headscale-net
+
+    ports:
+      # Puerto DERP/STUN (UDP) - DEBE estar expuesto para que los clientes se conecten
+      - "${HEADSCALE_DERP_PORT:-3478}:3478/udp"
+
+      # Puerto HTTP API - expuesto solo si ENABLE_SSL=false (descomentar manualmente o usar override)
+      # - "${HEADSCALE_HTTP_PORT:-8080}:8080"
+
+      # Puerto Metrics (opcional, comentado por defecto por seguridad)
+      # - "${HEADSCALE_METRICS_PORT:-9090}:9090"
+
+    environment:
+      - TZ=${TZ:-UTC}
+
+    command: serve
+
+    healthcheck:
+      test: ["CMD", "headscale", "health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+      - NET_ADMIN
+
+    security_opt:
+      - no-new-privileges:true
+
+  # ---------------------------------------------------------------------------
+  # HEADPLANE - Web UI
+  # ---------------------------------------------------------------------------
+  headplane:
+    image: ghcr.io/tale/headplane:${HEADPLANE_IMAGE_TAG:-latest}
+    container_name: headplane
+    restart: unless-stopped
+
+    depends_on:
+      headscale:
+        condition: service_healthy
+
+    volumes:
+      # Configuración
+      - ./headplane-config.yaml:/etc/headplane/config.yaml:ro
+
+      # Socket Unix compartido con Headscale (modo integrated)
+      - headscale-socket:/var/run/headscale:ro
+
+      # Config de Headscale (solo lectura, para modo integrated)
+      - ./headscale-config.yaml:/etc/headscale/config.yaml:ro
+
+    networks:
+      - headscale-net
+
+    # Descomentar ports si ENABLE_SSL=false para exponer directamente
+    # ports:
+    #   - "${HEADPLANE_PORT:-3000}:3000"
+
+    environment:
+      - TZ=${TZ:-UTC}
+      - CONFIG_PATH=/etc/headplane/config.yaml
+
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+    security_opt:
+      - no-new-privileges:true
+
+  # ---------------------------------------------------------------------------
+  # CADDY - Reverse Proxy con TLS automático
+  # ---------------------------------------------------------------------------
+  # Solo se activa si ENABLE_SSL=true (profile: ssl)
+  caddy:
+    image: caddy:${CADDY_IMAGE_TAG:-2-alpine}
+    container_name: caddy
+    restart: unless-stopped
+    profiles:
+      - ssl
+
+    depends_on:
+      headplane:
+        condition: service_healthy
+
+    volumes:
+      # Caddyfile
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+
+      # Datos persistentes (certificados)
+      - caddy-data:/data
+
+      # Configuración persistente
+      - caddy-config:/config
+
+      # Logs
+      - ./data/caddy-logs:/var/log/caddy
+
+    networks:
+      - headscale-net
+
+    ports:
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
+      # Puerto HTTP/3 (QUIC)
+      - "${HTTPS_PORT:-443}:443/udp"
+
+    environment:
+      - TZ=${TZ:-UTC}
+      - ACME_EMAIL=${ACME_EMAIL:-}
+
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:2019/config/"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+    security_opt:
+      - no-new-privileges:true
