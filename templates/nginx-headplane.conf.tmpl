@@ -1,0 +1,60 @@
+# =============================================================================
+# Nginx - Interfaz web de Headplane
+# Generado por install.sh - NO editar a mano
+# =============================================================================
+# Dominio : ${HEADPLANE_DOMAIN}
+# Backend : ${BACKEND_HOST}:${HEADPLANE_PORT}
+#
+# REQUISITO: este fichero usa $connection_upgrade, que se declara con el
+# 'map' de nginx-headscale.conf. Instala ambos ficheros, o copia ese bloque
+# 'map' al contexto http {}; si no, nginx no arranca ("unknown variable").
+#
+# Headplane SIEMPRE se sirve bajo /admin: el prefijo está compilado en la
+# imagen (los assets se generan como /admin/assets/...). No intentes quitarlo
+# con un rewrite en el proxy: la aplicación seguiría generando enlaces y URLs
+# de assets bajo /admin y la UI cargaría en blanco. Cambiarlo exige recompilar
+# Headplane con __INTERNAL_PREFIX.
+# =============================================================================
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name ${HEADPLANE_DOMAIN};
+
+    location /.well-known/acme-challenge/ { root /var/www/certbot; }
+    location / { return 301 https://$host$request_uri; }
+}
+
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    http2 on;
+    server_name ${HEADPLANE_DOMAIN};
+
+    ssl_certificate     /etc/letsencrypt/live/${HEADPLANE_DOMAIN}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/${HEADPLANE_DOMAIN}/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+
+    # Comodidad: la raíz del dominio no sirve nada, así que se manda a la UI.
+    location = / { return 301 https://$host/admin; }
+
+    location /admin {
+        proxy_pass http://${BACKEND_HOST}:${HEADPLANE_PORT};
+        proxy_http_version 1.1;
+
+        # /admin/events/live es un stream SSE: necesita Upgrade y nada de buffer
+        proxy_set_header Upgrade    $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_redirect http:// https://;
+
+        # Sin esto el stream de eventos en vivo de la UI no actualiza nada
+        proxy_buffering off;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+}

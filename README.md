@@ -22,6 +22,7 @@
 - [Requisitos](#-requisitos)
 - [Instalación Rápida](#-instalación-rápida)
 - [Configuración](#-configuración)
+  - [Modos de despliegue](#modos-de-despliegue)
 - [Uso](#-uso)
 - [Arquitectura](#-arquitectura)
 - [Reconfiguración](#-reconfiguración)
@@ -170,19 +171,78 @@ docker compose up -d  # Sin SSL
 
 ## ⚙️ Configuración
 
+### Modos de despliegue
+
+Lo primero que pregunta el instalador. La respuesta determina quién termina
+TLS, si arranca Caddy y cuántos dominios hacen falta:
+
+| Modo | Quién termina TLS | Dominios | Caddy | Cuándo usarlo |
+|------|-------------------|----------|-------|---------------|
+| **`standalone`** | Caddy, en esta máquina | 1 | ✅ arranca | Una sola máquina, sin nada delante. Lo más simple. |
+| **`proxy-single`** | Proxy externo | 1 | ❌ | Ya tienes NPM/Traefik y quieres un único dominio. |
+| **`proxy-split`** | Proxy externo | 2 | ❌ | Control plane y UI en dominios distintos. |
+| **`plain`** | Nadie (HTTP) | 1 | ❌ | LAN de confianza y desarrollo. |
+
+En **todos** los modos la interfaz web se sirve bajo **`/admin`**: el prefijo
+está compilado en la imagen de Headplane y no se puede quitar con un rewrite
+en el proxy.
+
+**`standalone`** — todo en una máquina:
+
+```
+cliente ──HTTPS──▶ Caddy ─┬─▶ /       Headscale
+                          └─▶ /admin  Headplane
+```
+
+**`proxy-single`** — un dominio, proxy en otra máquina:
+
+```
+cliente ──HTTPS──▶ NPM ─┬─▶ HTTP  backend:8080  Headscale   (vpn.midominio.com/)
+                        └─▶ HTTP  backend:3000  Headplane   (vpn.midominio.com/admin)
+```
+
+**`proxy-split`** — dos dominios (necesita CORS):
+
+```
+cliente ──HTTPS──▶ NPM ─┬─▶ ts.midominio.com    ─▶ HTTP backend:8080  Headscale
+                        └─▶ admin.midominio.com ─▶ HTTP backend:3000  Headplane
+```
+
+En los dos modos `proxy-*` el instalador escribe en `reverse-proxy/` los
+ficheros de Nginx ya rellenados y una guía paso a paso para Nginx Proxy
+Manager (`REVERSE-PROXY.md`). Cópialos a la máquina del proxy.
+
+> ⚠️ **El puerto UDP DERP (3478) no pasa por ningún reverse proxy HTTP.**
+> Ábrelo directamente contra la máquina de Headscale, o desactiva
+> `derp.server.enabled` en `headscale-config.yaml` y usa los relays públicos
+> de Tailscale.
+
+> ⚠️ En los modos `proxy-*` y `plain`, los puertos 8080 y 3000 se publican
+> **sin cifrar**. Restringe el acceso por firewall a la IP del proxy
+> (el instalador la pide como `PROXY_CIDR`).
+
 ### Variables de Entorno Principales
 
 El archivo `.env` (generado por `install.sh`) contiene todas las configuraciones:
 
 | Variable | Descripción | Ejemplo |
 |----------|-------------|---------|
-| `SERVER_URL` | URL pública del servidor | `https://vpn.midominio.com` |
-| `ENABLE_SSL` | Habilitar SSL/TLS | `true` o `false` |
-| `SSL_MODE` | Modo SSL | `letsencrypt` o `selfsigned` |
+| `DEPLOY_MODE` | Modo de despliegue (ver tabla de arriba) | `standalone`, `proxy-split` |
+| `SERVER_URL` | URL pública del control plane | `https://ts.midominio.com` |
+| `HEADPLANE_PUBLIC_URL` | URL pública de la UI (la UI va en `/admin`) | `https://admin.midominio.com` |
+| `ENABLE_SSL` | **Arrancar Caddy** (profile `ssl`), *no* "hay HTTPS" | `true` o `false` |
+| `SSL_MODE` | Origen del certificado | `letsencrypt`, `selfsigned`, `external`, `none` |
 | `ACME_EMAIL` | Email para Let's Encrypt | `admin@midominio.com` |
+| `BACKEND_HOST` | IP de esta máquina vista desde el proxy | `192.168.1.10` |
+| `PROXY_CIDR` | CIDR del proxy → `trusted_proxies` de Headscale | `192.168.1.50/32` |
+| `BIND_ADDRESS` | Interfaz donde publicar los puertos sin Caddy | `0.0.0.0` |
 | `TAILNET_NAME` | Nombre de la organización | `myorg` |
 | `ENABLE_OIDC` | Habilitar autenticación OIDC | `true` o `false` |
 | `OIDC_ISSUER_URL` | URL del proveedor OIDC | `https://auth.example.com/realms/master` |
+
+> `ENABLE_SSL` tiene un nombre heredado y engañoso: significa "levantar el
+> contenedor Caddy". En `proxy-single` y `proxy-split` vale `false` y **sí**
+> hay HTTPS, sólo que lo termina el proxy externo.
 
 Ver [.env.example](.env.example) para la lista completa de variables.
 
@@ -190,11 +250,11 @@ Ver [.env.example](.env.example) para la lista completa de variables.
 
 | Puerto | Protocolo | Servicio | Descripción |
 |--------|-----------|----------|-------------|
-| 80 | TCP | Caddy | HTTP (redirección a HTTPS) |
-| 443 | TCP/UDP | Caddy | HTTPS / HTTP/3 |
-| 3000 | TCP | Headplane | Web UI (interno si SSL, expuesto si no) |
-| 3478 | UDP | Headscale | DERP/STUN (debe ser accesible) |
-| 8080 | TCP | Headscale | API HTTP (interno) |
+| 80 | TCP | Caddy | HTTP (redirección a HTTPS) — sólo `standalone` |
+| 443 | TCP/UDP | Caddy | HTTPS / HTTP/3 — sólo `standalone` |
+| 3000 | TCP | Headplane | Web UI (interno en `standalone`, publicado en el resto) |
+| 3478 | UDP | Headscale | DERP/STUN — **siempre directo, nunca vía proxy** |
+| 8080 | TCP | Headscale | API HTTP (interno en `standalone`, publicado en el resto) |
 | 50443 | TCP | Headscale | gRPC (interno) |
 | 9090 | TCP | Headscale | Metrics (interno, opcional) |
 
@@ -488,26 +548,24 @@ docker compose down
 docker compose --profile ssl up -d  # Ajustar según SSL
 ```
 
-### Cambiar de HTTP a HTTPS
+### Cambiar de modo de despliegue
+
+Re-ejecuta el instalador y elige otro modo en la primera pregunta:
 
 ```bash
-# Opción 1: Re-ejecutar instalador
 ./install.sh
-
-# Opción 2: Manual
-# 1. Editar .env
-ENABLE_SSL=true
-SSL_MODE=letsencrypt
-ACME_EMAIL=tu@email.com
-SERVER_URL=https://tu-dominio.com
-
-# 2. Regenerar Caddyfile
-envsubst < templates/Caddyfile.tmpl > Caddyfile
-
-# 3. Reiniciar con profile SSL
-docker compose down
-docker compose --profile ssl up -d
 ```
+
+El instalador lee el `.env` actual, propone los valores existentes como
+predeterminados y regenera todo lo que cambie: `headscale-config.yaml`,
+`Caddyfile`, `docker-compose.override.yml` y `reverse-proxy/`. Al pasar de
+`standalone` a un modo `proxy-*` también para y elimina el contenedor de
+Caddy, que si no seguiría ocupando los puertos 80 y 443.
+
+> ⚠️ Cambiar `SERVER_URL` (por ejemplo al pasar de `http://ip:8080` a
+> `https://ts.midominio.com`) **invalida el registro de los nodos ya
+> conectados**: apuntan a la URL antigua y tendrás que volver a ejecutar
+> `tailscale up --login-server=<nueva-url>` en cada uno.
 
 ---
 
@@ -623,6 +681,31 @@ sudo firewall-cmd --reload
 # iptables directo
 sudo iptables -A INPUT -p udp --dport 3478 -j ACCEPT
 ```
+
+### Problemas específicos de los modos con proxy externo
+
+| Síntoma | Causa | Solución |
+|---------|-------|----------|
+| Los nodos se desconectan y reconectan cada ~60 s | `/machine/map` es un long-poll y el proxy lo corta con su `proxy_read_timeout` por defecto | `proxy_read_timeout 3600s;` y `proxy_buffering off;` en el proxy |
+| `tailscale up` se queda colgado sin error | `/ts2021` necesita un `Upgrade` de HTTP/1.1 | Activa *Websockets Support* en NPM, o las cabeceras `Upgrade`/`Connection` en Nginx |
+| La UI carga en blanco | Se intentó quitar el prefijo `/admin` con un `rewrite` | Quita el rewrite: el prefijo está compilado en la imagen |
+| La UI no puede hablar con la API (errores CORS en la consola) | Modo `proxy-split` sin cabeceras CORS | Aplica el bloque CORS de `reverse-proxy/nginx-headscale.conf` |
+| Todos los nodos aparecen con la misma IP en los logs | Falta `trusted_proxies` | Pon el CIDR del proxy en `PROXY_CIDR` y re-ejecuta el instalador |
+| El navegador pierde la sesión de Headplane al recargar | `SESSION_SECURE=false` sirviendo por HTTPS | Re-ejecuta el instalador: lo deriva de `URL_SCHEME` |
+| Los nodos conectan pero no se ven entre sí | UDP 3478 cerrado (no pasa por el proxy) | Ábrelo directo contra la máquina de Headscale |
+
+Comprobación rápida desde la máquina del proxy, saltándose el proxy:
+
+```bash
+# El control plane responde con su clave pública
+curl -s http://<BACKEND_HOST>:8080/key?v=142
+
+# La UI responde en /admin
+curl -sI http://<BACKEND_HOST>:3000/admin | head -1
+```
+
+Si estos dos funcionan pero los dominios públicos no, el problema está en el
+proxy; si fallan, está en la máquina de Headscale (firewall o `BIND_ADDRESS`).
 
 ### Let's Encrypt falla (DNS no propagado)
 

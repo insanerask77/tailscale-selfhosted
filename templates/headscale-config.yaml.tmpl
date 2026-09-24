@@ -104,6 +104,10 @@ log:
   format: text
   level: ${LOG_LEVEL}
 
+# Proxies de confianza. Sólo se rellena en los modos con reverse proxy externo.
+# Sin esto, Headscale registra la IP del proxy como IP de todos los clientes.
+${TRUSTED_PROXIES_CONFIG}
+
 # Unix socket para comunicación local (usado por Headplane en modo integrated)
 unix_socket: /var/run/headscale/headscale.sock
 unix_socket_permission: "0770"

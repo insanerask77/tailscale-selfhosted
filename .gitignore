@@ -14,6 +14,10 @@ Caddyfile
 # CA raíz exportada de Caddy (SSL_MODE=selfsigned)
 caddy-root-ca.crt
 
+# Configuración del proxy externo: generada, y contiene IPs de la
+# infraestructura (BACKEND_HOST, PROXY_CIDR)
+reverse-proxy/
+
 # Logs
 *.log
 

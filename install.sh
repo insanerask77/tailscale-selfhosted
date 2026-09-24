@@ -132,6 +132,67 @@ ask_input() {
     done
 }
 
+# Menú numerado. Imprime en stderr para no contaminar la captura por $(...)
+# y devuelve por stdout la clave elegida. Uso:
+#   ask_choice "Pregunta" "actual" "clave1|Título|Descripción" "clave2|..."
+ask_choice() {
+    local prompt="$1"
+    local current="$2"
+    shift 2
+    local options=("$@")
+    local n=${#options[@]}
+    local default_idx=1
+    local i key title desc choice
+
+    for i in "${!options[@]}"; do
+        IFS='|' read -r key title desc <<< "${options[$i]}"
+        [[ "$key" == "$current" ]] && default_idx=$((i + 1))
+    done
+
+    {
+        echo ""
+        echo -e "${CYAN}${BOLD}${prompt}${NC}"
+        echo ""
+        for i in "${!options[@]}"; do
+            IFS='|' read -r key title desc <<< "${options[$i]}"
+            echo -e "  ${BOLD}$((i + 1))${NC}) ${BOLD}${title}${NC}"
+            echo -e "     ${desc}"
+        done
+        echo ""
+    } >&2
+
+    while true; do
+        read -r -p "$(echo -e "${CYAN}?${NC} Elige una opción [1-${n}] [${default_idx}]: ")" choice >&2
+        choice="${choice:-$default_idx}"
+
+        if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= n )); then
+            IFS='|' read -r key title desc <<< "${options[$((choice - 1))]}"
+            echo "$key"
+            return 0
+        fi
+        print_warning "Opción inválida, elige un número entre 1 y ${n}" >&2
+    done
+}
+
+# Validar un CIDR IPv4/IPv6. Headscale rechaza los prefijos /0 en
+# trusted_proxies, así que aquí se rechazan también para fallar antes.
+validate_cidr() {
+    local input="$1"
+
+    if [[ ! "$input" =~ ^[0-9a-fA-F:.]+/[0-9]{1,3}$ ]]; then
+        print_error "Formato inválido: se espera un CIDR, por ejemplo 192.168.1.10/32"
+        return 1
+    fi
+
+    local bits="${input##*/}"
+    if [[ "$bits" == "0" ]]; then
+        print_error "Headscale no admite el prefijo /0 en trusted_proxies"
+        return 1
+    fi
+
+    return 0
+}
+
 # Validar dominio o IP
 validate_domain_or_ip() {
     local input="$1"
@@ -344,49 +405,142 @@ load_existing_config() {
     return 1
 }
 
+# El modo de despliegue determina tres cosas que antes iban mezcladas en
+# ENABLE_SSL: quién termina TLS, si arranca Caddy, y si hay uno o dos dominios.
+#
+#   standalone   Caddy embebido termina TLS. Un dominio, UI en /admin.
+#   proxy-single Proxy externo termina TLS. Un dominio, UI en /admin.
+#   proxy-split  Proxy externo termina TLS. Dominios separados (requiere CORS).
+#   plain        Sin TLS. Puertos publicados directamente. Sólo LAN/desarrollo.
+configure_deployment_mode() {
+    print_header "MODO DE DESPLIEGUE"
+
+    DEPLOY_MODE=$(ask_choice "¿Cómo se va a exponer este stack?" "${DEPLOY_MODE:-standalone}" \
+        "standalone|Todo-en-uno con Caddy incluido|Caddy termina TLS en esta máquina. Un solo dominio: la UI queda en /admin. Sin dependencias externas." \
+        "proxy-single|Detrás de un proxy externo, un dominio|Nginx Proxy Manager/Traefik termina TLS. Un dominio: / -> Headscale, /admin -> Headplane. Sin CORS." \
+        "proxy-split|Detrás de un proxy externo, dominios separados|Un dominio para el control plane y otro para la UI. Necesita cabeceras CORS en el proxy." \
+        "plain|HTTP plano, sin TLS|Puertos publicados sin cifrar. Sólo para LAN de confianza y desarrollo.")
+
+    case "$DEPLOY_MODE" in
+        standalone)
+            RUN_CADDY="true";  URL_SCHEME="https"; SPLIT_DOMAINS="false" ;;
+        proxy-single)
+            RUN_CADDY="false"; URL_SCHEME="https"; SPLIT_DOMAINS="false"; SSL_MODE="external" ;;
+        proxy-split)
+            RUN_CADDY="false"; URL_SCHEME="https"; SPLIT_DOMAINS="true";  SSL_MODE="external" ;;
+        plain)
+            RUN_CADDY="false"; URL_SCHEME="http";  SPLIT_DOMAINS="false"; SSL_MODE="none" ;;
+    esac
+
+    # ENABLE_SSL se conserva porque docker-compose lo usa para el profile y
+    # varios sitios lo consultan, pero ahora significa "arranca Caddy", no
+    # "hay HTTPS": con proxy externo hay HTTPS y Caddy NO debe arrancar.
+    ENABLE_SSL="$RUN_CADDY"
+
+    print_success "Modo de despliegue: ${DEPLOY_MODE}"
+}
+
 configure_network() {
     print_header "CONFIGURACIÓN DE RED Y ACCESO"
 
-    # Dominio o IP
-    print_info "Ingresa el dominio o IP pública/privada para acceder al servicio"
-    print_info "Ejemplos: vpn.midominio.com, 192.168.1.100, 10.0.0.5"
-    DOMAIN=$(ask_input "Dominio o IP" "${DOMAIN:-vpn.example.com}" "validate_domain_or_ip")
+    if [[ "$SPLIT_DOMAINS" == "true" ]]; then
+        print_info "Dominio del control plane: el que usarán los clientes en --login-server"
+        print_info "Ejemplo: ts.midominio.com"
+        HEADSCALE_DOMAIN=$(ask_input "Dominio de Headscale" \
+            "${HEADSCALE_DOMAIN:-${DOMAIN:-ts.example.com}}" "validate_domain_or_ip")
 
-    # SSL
-    if ask_yes_no "¿Deseas habilitar SSL/TLS (HTTPS)?" "${ENABLE_SSL:-y}"; then
-        ENABLE_SSL="true"
+        print_info "Dominio de la interfaz web (distinto del anterior)"
+        print_info "Ejemplo: admin.ts.midominio.com"
+        HEADPLANE_DOMAIN=$(ask_input "Dominio de Headplane" \
+            "${HEADPLANE_DOMAIN:-admin.${HEADSCALE_DOMAIN}}" "validate_domain_or_ip")
 
-        # Verificar si es un dominio válido (no IP) para Let's Encrypt
-        if [[ "$DOMAIN" =~ ^[0-9.]+$ ]] || [[ "$DOMAIN" == "localhost" ]]; then
-            print_warning "Has ingresado una IP o localhost"
-            print_warning "Let's Encrypt requiere un dominio válido con DNS público"
-            SSL_MODE="selfsigned"
-            print_info "Se usará un certificado autofirmado"
-        else
-            if ask_yes_no "¿Tienes un dominio válido con DNS apuntando a este servidor?" "y"; then
-                SSL_MODE="letsencrypt"
-                print_info "Se usará Let's Encrypt para certificado automático"
-
-                # Pedir email para Let's Encrypt
-                print_info "Let's Encrypt requiere un email para notificaciones de renovación"
-                ACME_EMAIL=$(ask_input "Email para Let's Encrypt" "${ACME_EMAIL:-admin@${DOMAIN}}" "validate_email")
-            else
-                SSL_MODE="selfsigned"
-                print_info "Se usará un certificado autofirmado"
-            fi
+        if [[ "$HEADPLANE_DOMAIN" == "$HEADSCALE_DOMAIN" ]]; then
+            print_error "Los dos dominios no pueden ser iguales en modo proxy-split"
+            print_info "Usa el modo 'proxy-single' si quieres compartir dominio"
+            exit 1
         fi
 
-        URL_SCHEME="https"
+        # DOMAIN se mantiene por compatibilidad con el resto del script
+        DOMAIN="$HEADSCALE_DOMAIN"
     else
-        ENABLE_SSL="false"
-        SSL_MODE="none"
-        URL_SCHEME="http"
+        print_info "Dominio o IP para acceder al servicio"
+        print_info "Ejemplos: vpn.midominio.com, 192.168.1.100"
+        DOMAIN=$(ask_input "Dominio o IP" "${DOMAIN:-vpn.example.com}" "validate_domain_or_ip")
+        HEADSCALE_DOMAIN="$DOMAIN"
+        HEADPLANE_DOMAIN="$DOMAIN"
+    fi
 
-        print_warning "ADVERTENCIA: El servicio se expondrá sin cifrado (HTTP plano)"
-        print_warning "Esto NO es recomendable para entornos de producción expuestos a internet"
+    # El tipo de certificado sólo se pregunta cuando Caddy es quien lo emite.
+    if [[ "$RUN_CADDY" == "true" ]]; then
+        if [[ "$DOMAIN" =~ ^[0-9.]+$ ]] || [[ "$DOMAIN" == "localhost" ]]; then
+            print_warning "Has indicado una IP o localhost: Let's Encrypt necesita un dominio público"
+            SSL_MODE="selfsigned"
+        elif ask_yes_no "¿El DNS de ${DOMAIN} apunta ya a esta máquina (necesario para Let's Encrypt)?" "y"; then
+            SSL_MODE="letsencrypt"
+            print_info "Let's Encrypt necesita un email para avisos de renovación"
+            ACME_EMAIL=$(ask_input "Email para Let's Encrypt" "${ACME_EMAIL:-admin@${DOMAIN}}" "validate_email")
+        else
+            SSL_MODE="selfsigned"
+        fi
+
+        if [[ "$SSL_MODE" == "selfsigned" ]]; then
+            print_info "Se usará un certificado autofirmado"
+            print_warning "Tendrás que instalar la CA en cada cliente Tailscale (se exporta al final)"
+        fi
+    fi
+
+    if [[ "$DEPLOY_MODE" == "plain" ]]; then
+        print_warning "ADVERTENCIA: el plano de control viajará sin cifrar"
+        print_warning "No expongas esto a internet"
     fi
 
     print_success "Configuración de red completada"
+}
+
+# En los modos con proxy externo, Headscale ve todas las peticiones con la IP
+# del proxy. trusted_proxies (Headscale 0.29+) activa el middleware de IP real
+# para que los logs y las ACL vean la IP del cliente.
+# Además hay que decidir a qué interfaz se publican los puertos: dejarlos en
+# 0.0.0.0 los expone a toda la red, no sólo al proxy.
+configure_proxy_access() {
+    [[ "$RUN_CADDY" == "true" ]] && return 0
+
+    print_header "ACCESO DESDE EL PROXY / RED"
+
+    if [[ "$DEPLOY_MODE" == "plain" ]]; then
+        BIND_ADDRESS=$(ask_input "Interfaz donde publicar los puertos (0.0.0.0 = todas)" \
+            "${BIND_ADDRESS:-0.0.0.0}")
+        PROXY_CIDR=""
+        return 0
+    fi
+
+    print_info "El proxy corre en otra máquina y debe poder alcanzar estos puertos."
+    print_info "Publicarlos en 0.0.0.0 los deja accesibles a toda la red;"
+    print_info "indica la IP de esta máquina en la red del proxy para limitarlo."
+    BIND_ADDRESS=$(ask_input "Interfaz donde publicar los puertos" "${BIND_ADDRESS:-0.0.0.0}")
+
+    if [[ "$BIND_ADDRESS" == "0.0.0.0" ]]; then
+        print_warning "Los puertos ${HEADSCALE_HTTP_PORT:-8080} y ${HEADPLANE_PORT:-3000} quedarán"
+        print_warning "accesibles sin cifrar desde cualquier host que llegue a esta máquina."
+        print_warning "Protégelos con firewall si la red no es de confianza."
+    fi
+
+    echo ""
+    print_info "IP o rango del proxy, en notación CIDR. Headscale confiará en sus"
+    print_info "cabeceras X-Forwarded-For para registrar la IP real del cliente."
+    print_info "Ejemplos: 192.168.1.50/32 (una IP), 192.168.1.0/24 (una red)"
+    PROXY_CIDR=$(ask_input "CIDR del proxy" "${PROXY_CIDR:-192.168.1.0/24}" "validate_cidr")
+
+    # El proxy está en otra máquina y necesita una dirección con la que llegar
+    # aquí. No se puede deducir; se ofrece la IP local como pista.
+    echo ""
+    local guess
+    guess=$(ip -4 route get 1.1.1.1 2>/dev/null | grep -oE 'src [0-9.]+' | awk '{print $2}' | head -1)
+    print_info "Dirección de ESTA máquina tal como la ve el proxy (destino del reverse proxy)"
+    BACKEND_HOST=$(ask_input "IP o hostname de esta máquina" \
+                             "${BACKEND_HOST:-${guess:-192.168.1.10}}")
+
+    print_success "Acceso configurado"
 }
 
 configure_ports() {
@@ -394,11 +548,14 @@ configure_ports() {
 
     print_info "Puertos por defecto recomendados. Presiona Enter para usar los valores por defecto."
 
-    if [[ "$ENABLE_SSL" == "true" ]]; then
+    if [[ "$RUN_CADDY" == "true" ]]; then
         HTTP_PORT=$(ask_input "Puerto HTTP (para redirección a HTTPS)" "${HTTP_PORT:-80}" "validate_port")
         HTTPS_PORT=$(ask_input "Puerto HTTPS" "${HTTPS_PORT:-443}" "validate_port")
-        HEADPLANE_PORT="3000"  # Interno, no expuesto
+        HEADPLANE_PORT="3000"  # Interno, sólo accesible por Caddy
     else
+        # Sin Caddy, estos dos puertos se publican en el host: son los que el
+        # proxy externo (o el cliente, en modo plain) tiene que alcanzar.
+        print_info "Estos puertos se publicarán en el host para que los alcance el proxy"
         HEADPLANE_PORT=$(ask_input "Puerto web de Headplane" "${HEADPLANE_PORT:-3000}" "validate_port")
         HTTP_PORT="80"
         HTTPS_PORT="443"
@@ -412,29 +569,41 @@ configure_ports() {
     print_success "Configuración de puertos completada"
 }
 
+# Las URLs públicas dependen del modo, del dominio Y de los puertos, así que
+# sólo pueden calcularse después de configure_ports.
+#
+# Importante: son las URLs que ve el MUNDO, no las internas. En los modos con
+# proxy, Headscale y Headplane siguen hablando HTTP por la red de Docker, pero
+# anuncian https://... porque es lo que el cliente resuelve.
 compute_public_urls() {
-    # Las URLs públicas dependen del dominio Y de los puertos, por lo que sólo
-    # pueden calcularse después de configure_ports.
-    #
-    # Con proxy (SSL): Caddy sirve ambos servicios en el mismo dominio y puerto
-    #   estándar; el enrutado se hace por ruta (/admin -> Headplane, resto ->
-    #   Headscale). Ninguna URL lleva puerto.
-    #
-    # Sin proxy: cada servicio se expone en su propio puerto del host, por lo
-    #   que las URLs son distintas y DEBEN incluirlo.
-    if [[ "$ENABLE_SSL" == "true" ]]; then
-        local suffix=""
-        [[ "$HTTPS_PORT" != "443" ]] && suffix=":${HTTPS_PORT}"
-        HEADSCALE_PUBLIC_URL="${URL_SCHEME}://${DOMAIN}${suffix}"
-        HEADPLANE_PUBLIC_URL="${URL_SCHEME}://${DOMAIN}${suffix}"
-    else
-        HEADSCALE_PUBLIC_URL="${URL_SCHEME}://${DOMAIN}:${HEADSCALE_HTTP_PORT}"
-        HEADPLANE_PUBLIC_URL="${URL_SCHEME}://${DOMAIN}:${HEADPLANE_PORT}"
-    fi
+    case "$DEPLOY_MODE" in
+        standalone)
+            # Caddy sirve ambos en el mismo dominio y enruta por ruta.
+            local suffix=""
+            [[ "$HTTPS_PORT" != "443" ]] && suffix=":${HTTPS_PORT}"
+            HEADSCALE_PUBLIC_URL="https://${DOMAIN}${suffix}"
+            HEADPLANE_PUBLIC_URL="https://${DOMAIN}${suffix}"
+            ;;
+        proxy-single)
+            # El proxy externo escucha en 443 estándar; sin puerto en la URL.
+            HEADSCALE_PUBLIC_URL="https://${HEADSCALE_DOMAIN}"
+            HEADPLANE_PUBLIC_URL="https://${HEADSCALE_DOMAIN}"
+            ;;
+        proxy-split)
+            HEADSCALE_PUBLIC_URL="https://${HEADSCALE_DOMAIN}"
+            HEADPLANE_PUBLIC_URL="https://${HEADPLANE_DOMAIN}"
+            ;;
+        plain)
+            # Cada servicio en su propio puerto del host: las URLs lo llevan.
+            HEADSCALE_PUBLIC_URL="http://${DOMAIN}:${HEADSCALE_HTTP_PORT}"
+            HEADPLANE_PUBLIC_URL="http://${DOMAIN}:${HEADPLANE_PORT}"
+            ;;
+    esac
 
     # SERVER_URL = URL del control plane; es la que usan los clientes Tailscale
     SERVER_URL="$HEADSCALE_PUBLIC_URL"
 
+    echo ""
     print_info "URL del control plane (Headscale): ${HEADSCALE_PUBLIC_URL}"
     print_info "URL de la interfaz web (Headplane): ${HEADPLANE_PUBLIC_URL}/admin"
 }
@@ -513,7 +682,10 @@ generate_env_file() {
     # Variables derivadas: deben existir como variables de shell (no solo en el
     # heredoc) porque las plantillas se rellenan con envsubst más adelante.
     AUTH_TYPE=$([[ "$ENABLE_OIDC" == "true" ]] && echo "oidc" || echo "local")
-    SESSION_SECURE=$([[ "$ENABLE_SSL" == "true" ]] && echo "true" || echo "false")
+    # La cookie debe marcarse Secure siempre que el navegador hable HTTPS, lo
+    # que incluye los modos con proxy externo donde Caddy NO arranca. Por eso
+    # se decide sobre URL_SCHEME y no sobre ENABLE_SSL.
+    SESSION_SECURE=$([[ "$URL_SCHEME" == "https" ]] && echo "true" || echo "false")
 
     cat > "$ENV_FILE" <<EOF
 # =============================================================================
@@ -523,9 +695,20 @@ generate_env_file() {
 # Para reconfigurar: ejecuta ./install.sh
 
 # -----------------------------------------------------------------------------
+# MODO DE DESPLIEGUE
+# -----------------------------------------------------------------------------
+# standalone   -> Caddy embebido termina TLS (un dominio, UI en /admin)
+# proxy-single -> proxy externo, un dominio (/ -> Headscale, /admin -> UI)
+# proxy-split  -> proxy externo, dominios separados (requiere CORS)
+# plain        -> HTTP sin cifrar, puertos publicados directamente
+DEPLOY_MODE=${DEPLOY_MODE}
+
+# -----------------------------------------------------------------------------
 # RED Y ACCESO
 # -----------------------------------------------------------------------------
 DOMAIN=${DOMAIN}
+HEADSCALE_DOMAIN=${HEADSCALE_DOMAIN}
+HEADPLANE_DOMAIN=${HEADPLANE_DOMAIN}
 URL_SCHEME=${URL_SCHEME}
 
 # URL del control plane: la que usan los clientes con --login-server
@@ -535,9 +718,21 @@ HEADSCALE_PUBLIC_URL=${HEADSCALE_PUBLIC_URL}
 # URL pública de la interfaz web (la UI se sirve bajo /admin)
 HEADPLANE_PUBLIC_URL=${HEADPLANE_PUBLIC_URL}
 
+# ENABLE_SSL significa "arrancar Caddy", no "hay HTTPS": en los modos
+# proxy-* hay HTTPS pero lo termina el proxy externo y Caddy no debe arrancar.
 ENABLE_SSL=${ENABLE_SSL}
 SSL_MODE=${SSL_MODE}
 ACME_EMAIL=${ACME_EMAIL:-}
+
+# Interfaz del host donde se publican los puertos cuando no hay Caddy
+BIND_ADDRESS=${BIND_ADDRESS:-0.0.0.0}
+
+# CIDR del reverse proxy externo. Headscale confía en su X-Forwarded-For
+# para registrar la IP real del cliente (trusted_proxies).
+PROXY_CIDR=${PROXY_CIDR:-}
+
+# Dirección de esta máquina vista desde el proxy (destino del reverse proxy)
+BACKEND_HOST=${BACKEND_HOST:-}
 
 # -----------------------------------------------------------------------------
 # PUERTOS
@@ -635,10 +830,24 @@ EOFC
         OIDC_CONFIG="# OIDC deshabilitado"
     fi
 
+    # Detrás de un proxy externo, Headscale ve la IP del proxy en todas las
+    # peticiones. trusted_proxies activa el middleware de IP real para que los
+    # logs y las ACL vean la del cliente. Headscale rechaza el prefijo /0.
+    if [[ -n "${PROXY_CIDR:-}" ]]; then
+        TRUSTED_PROXIES_CONFIG=$(cat <<EOFP
+trusted_proxies:
+  - ${PROXY_CIDR}
+EOFP
+        )
+    else
+        TRUSTED_PROXIES_CONFIG="# trusted_proxies: sin proxy externo configurado"
+    fi
+
     # Cargar plantilla y sustituir variables
     export SERVER_URL HEADSCALE_HTTP_PORT HEADSCALE_METRICS_PORT HEADSCALE_GRPC_PORT \
            IP_PREFIXES_V4 IP_PREFIXES_V6 TAILNET_NAME HEADSCALE_DERP_PORT LOG_LEVEL \
-           OIDC_CONFIG OIDC_ISSUER_URL OIDC_CLIENT_ID OIDC_CLIENT_SECRET OIDC_SCOPE
+           OIDC_CONFIG OIDC_ISSUER_URL OIDC_CLIENT_ID OIDC_CLIENT_SECRET OIDC_SCOPE \
+           TRUSTED_PROXIES_CONFIG
 
     envsubst < "$TEMPLATES_DIR/headscale-config.yaml.tmpl" > "$SCRIPT_DIR/headscale-config.yaml"
 
@@ -667,8 +876,10 @@ EOFC
         OIDC_CONFIG_BLOCK="# OIDC disabled"
     fi
 
-    # Headplane exige un booleano estricto; nunca dejar el valor vacío
-    SESSION_SECURE=$([[ "$ENABLE_SSL" == "true" ]] && echo "true" || echo "false")
+    # Headplane exige un booleano estricto; nunca dejar el valor vacío.
+    # Depende del esquema que ve el NAVEGADOR, no de si Caddy arranca: con
+    # proxy externo hay HTTPS aunque Headplane reciba HTTP por dentro.
+    SESSION_SECURE=$([[ "$URL_SCHEME" == "https" ]] && echo "true" || echo "false")
 
     # La API key sólo existe tras arrancar Headscale. En la primera pasada se
     # omite la clave; bootstrap_headscale regenera este fichero con ella.
@@ -702,8 +913,8 @@ EOFC
 }
 
 generate_caddyfile() {
-    if [[ "$ENABLE_SSL" != "true" ]]; then
-        print_info "SSL deshabilitado, no se genera Caddyfile"
+    if [[ "$RUN_CADDY" != "true" ]]; then
+        print_info "Caddy no se usa en este modo, no se genera Caddyfile"
         return 0
     fi
 
@@ -737,34 +948,212 @@ EOF
 }
 
 generate_compose_override() {
-    # Si SSL está habilitado, no necesitamos override (Caddy maneja todo)
-    if [[ "$ENABLE_SSL" == "true" ]]; then
-        # Eliminar override si existe
+    # Con Caddy embebido nadie más necesita alcanzar los contenedores: Caddy
+    # los resuelve por la red de Docker y no se publica ningún puerto extra.
+    if [[ "$RUN_CADDY" == "true" ]]; then
         rm -f "$SCRIPT_DIR/docker-compose.override.yml"
         return 0
     fi
 
     print_header "GENERANDO DOCKER COMPOSE OVERRIDE"
 
-    print_info "Generando docker-compose.override.yml para exponer puertos sin SSL..."
+    print_info "Publicando puertos en ${BIND_ADDRESS:-0.0.0.0} para el acceso externo..."
 
-    cat > "$SCRIPT_DIR/docker-compose.override.yml" <<'EOF'
+    # BIND_ADDRESS se interpola ahora (heredoc sin comillas) porque Compose no
+    # admite variables en la parte de la IP de un mapeo de puertos.
+    cat > "$SCRIPT_DIR/docker-compose.override.yml" <<EOF
 # Docker Compose Override - Generado automáticamente por install.sh
-# Este archivo se usa cuando ENABLE_SSL=false para exponer puertos directamente
+# Se usa en los modos sin Caddy (proxy-single, proxy-split, plain) para
+# publicar los puertos que debe alcanzar el proxy externo o el cliente.
+#
+# NO editar a mano: install.sh lo regenera en cada ejecución.
 
 services:
   headscale:
     ports:
-      # Puerto HTTP API - expuesto directamente (sin proxy)
-      - "${HEADSCALE_HTTP_PORT:-8080}:8080"
+      # API HTTP del control plane -> destino del proxy para el dominio principal
+      - "${BIND_ADDRESS:-0.0.0.0}:\${HEADSCALE_HTTP_PORT:-8080}:8080"
 
   headplane:
     ports:
-      # Puerto web - expuesto directamente (sin proxy)
-      - "${HEADPLANE_PORT:-3000}:3000"
+      # Interfaz web -> destino del proxy para /admin o el dominio de la UI
+      - "${BIND_ADDRESS:-0.0.0.0}:\${HEADPLANE_PORT:-3000}:3000"
 EOF
 
     print_success "docker-compose.override.yml generado"
+}
+
+# Genera la configuración para el reverse proxy externo. No se aplica sola:
+# son ficheros para que el usuario los lleve a la máquina del proxy.
+generate_reverse_proxy_configs() {
+    if [[ "$DEPLOY_MODE" != "proxy-single" && "$DEPLOY_MODE" != "proxy-split" ]]; then
+        return 0
+    fi
+
+    print_header "GENERANDO CONFIGURACIÓN DEL PROXY EXTERNO"
+
+    local out_dir="${SCRIPT_DIR}/reverse-proxy"
+    mkdir -p "$out_dir"
+
+    # Con dominios separados, el navegador carga la UI desde un origen y la API
+    # vive en otro: sin estas cabeceras el navegador bloquea las llamadas.
+    if [[ "$DEPLOY_MODE" == "proxy-split" ]]; then
+        CORS_BLOCK=$(cat <<EOFC
+
+    # CORS: la UI (${HEADPLANE_PUBLIC_URL}) y la API están en orígenes
+    # distintos. 'always' es necesario para que las cabeceras salgan también
+    # en las respuestas de error.
+    add_header Access-Control-Allow-Origin      "${HEADPLANE_PUBLIC_URL}" always;
+    add_header Access-Control-Allow-Credentials "true" always;
+    add_header Access-Control-Allow-Headers     "Authorization, Content-Type" always;
+    add_header Access-Control-Allow-Methods     "GET, POST, PUT, DELETE, OPTIONS" always;
+    if (\$request_method = OPTIONS) { return 204; }
+EOFC
+        )
+    else
+        CORS_BLOCK="    # CORS innecesario: un solo dominio, mismo origen."
+    fi
+
+    # Con dominio único no hay un segundo server block: la UI tiene que ser un
+    # location MÁS del mismo server, o /admin acabaría en Headscale (404).
+    # Nginx resuelve los prefijos por longitud, así que el orden da igual.
+    if [[ "$DEPLOY_MODE" == "proxy-single" ]]; then
+        HEADPLANE_LOCATION=$(cat <<EOFH
+
+    # Interfaz web. El prefijo /admin está compilado en la imagen de
+    # Headplane: no lo reescribas, la UI cargaría en blanco.
+    location /admin {
+        proxy_pass http://${BACKEND_HOST}:${HEADPLANE_PORT};
+        proxy_http_version 1.1;
+
+        proxy_set_header Upgrade    \$http_upgrade;
+        proxy_set_header Connection \$connection_upgrade;
+
+        proxy_set_header Host              \$host;
+        proxy_set_header X-Real-IP         \$remote_addr;
+        proxy_set_header X-Forwarded-For   \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_redirect http:// https://;
+
+        # /admin/events/live es SSE: sin esto la UI no se actualiza sola
+        proxy_buffering off;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+EOFH
+        )
+        # Misma idea para NPM, pero con \$http_connection: \$connection_upgrade
+        # se declara en el 'map' del contexto http {}, que NPM no expone.
+        HEADPLANE_LOCATION_NPM=$(cat <<EOFN
+
+# Interfaz web en el MISMO dominio. Sin esto, /admin iría a Headscale.
+location /admin {
+    proxy_pass http://${BACKEND_HOST}:${HEADPLANE_PORT};
+    proxy_http_version 1.1;
+
+    proxy_set_header Upgrade    \$http_upgrade;
+    proxy_set_header Connection \$http_connection;
+    proxy_set_header Host              \$host;
+    proxy_set_header X-Real-IP         \$remote_addr;
+    proxy_set_header X-Forwarded-For   \$proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto \$scheme;
+
+    proxy_buffering off;
+    proxy_read_timeout 3600s;
+}
+EOFN
+        )
+        PROXY_HOST_2=$(cat <<EOFP2
+### Proxy Host 2 — no hace falta
+
+En modo \`proxy-single\` todo vive en \`${HEADSCALE_DOMAIN}\`: la UI es el
+\`location /admin\` que ya va incluido en el bloque *Advanced* de arriba.
+**No crees un segundo Proxy Host**: NPM no admite dos hosts con el mismo
+dominio y el segundo no se aplicaría.
+EOFP2
+        )
+    else
+        # En proxy-split la UI tiene su propio server block / Proxy Host.
+        HEADPLANE_LOCATION=""
+        HEADPLANE_LOCATION_NPM=""
+        PROXY_HOST_2=$(cat <<EOFP2
+### Proxy Host 2 — interfaz web
+
+**Details**
+
+| Campo | Valor |
+|---|---|
+| Domain Names | \`${HEADPLANE_DOMAIN}\` |
+| Scheme | \`http\` |
+| Forward Hostname / IP | \`${BACKEND_HOST}\` |
+| Forward Port | \`${HEADPLANE_PORT}\` |
+| **Websockets Support** | ✅ **activado** |
+
+**SSL**: Let's Encrypt, \`Force SSL\` ✅.
+
+**Advanced**:
+
+\`\`\`nginx
+# La raíz no sirve nada: Headplane vive bajo /admin
+location = / {
+    return 301 https://\$host/admin;
+}
+
+location /admin {
+    proxy_pass http://${BACKEND_HOST}:${HEADPLANE_PORT};
+    proxy_http_version 1.1;
+
+    proxy_set_header Upgrade    \$http_upgrade;
+    proxy_set_header Connection \$http_connection;
+    proxy_set_header Host              \$host;
+    proxy_set_header X-Real-IP         \$remote_addr;
+    proxy_set_header X-Forwarded-For   \$proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto \$scheme;
+
+    # /admin/events/live es SSE: sin esto la UI no se actualiza sola
+    proxy_buffering off;
+    proxy_read_timeout 3600s;
+}
+\`\`\`
+EOFP2
+        )
+    fi
+
+    export DEPLOY_MODE BACKEND_HOST CORS_BLOCK PROXY_CIDR \
+           HEADSCALE_DOMAIN HEADPLANE_DOMAIN \
+           HEADSCALE_PUBLIC_URL HEADPLANE_PUBLIC_URL \
+           HEADSCALE_HTTP_PORT HEADPLANE_PORT HEADSCALE_DERP_PORT \
+           HEADPLANE_LOCATION HEADPLANE_LOCATION_NPM PROXY_HOST_2
+
+    # envsubst con lista explícita: las plantillas nginx están llenas de
+    # $host, $http_upgrade, $remote_addr... que envsubst borraría si se le
+    # dejara sustituir todo.
+    local vars='${DEPLOY_MODE} ${BACKEND_HOST} ${CORS_BLOCK} ${PROXY_CIDR}'
+    vars+=' ${HEADSCALE_DOMAIN} ${HEADPLANE_DOMAIN}'
+    vars+=' ${HEADSCALE_PUBLIC_URL} ${HEADPLANE_PUBLIC_URL}'
+    vars+=' ${HEADSCALE_HTTP_PORT} ${HEADPLANE_PORT} ${HEADSCALE_DERP_PORT}'
+    vars+=' ${HEADPLANE_LOCATION} ${HEADPLANE_LOCATION_NPM} ${PROXY_HOST_2}'
+
+    envsubst "$vars" < "$TEMPLATES_DIR/nginx-headscale.conf.tmpl" > "$out_dir/nginx-headscale.conf"
+    envsubst "$vars" < "$TEMPLATES_DIR/REVERSE-PROXY.md.tmpl"     > "$out_dir/REVERSE-PROXY.md"
+
+    if [[ "$DEPLOY_MODE" == "proxy-split" ]]; then
+        envsubst "$vars" < "$TEMPLATES_DIR/nginx-headplane.conf.tmpl" > "$out_dir/nginx-headplane.conf"
+    else
+        # En dominio único la UI es un location del mismo server block, no un
+        # server aparte: un fichero separado sólo induciría a error.
+        rm -f "$out_dir/nginx-headplane.conf"
+    fi
+
+    # Comprobar que no quedaron marcadores sin sustituir
+    if grep -rlqE '\$\{[A-Z_]+\}' "$out_dir" 2>/dev/null; then
+        print_error "Quedaron variables sin sustituir en la configuración del proxy:"
+        grep -rnoE '\$\{[A-Z_]+\}' "$out_dir" | head -5
+        exit 1
+    fi
+
+    print_success "Configuración del proxy generada en: reverse-proxy/"
+    print_info "Lee reverse-proxy/REVERSE-PROXY.md y aplícala en la máquina del proxy"
 }
 
 create_data_dirs() {
@@ -787,7 +1176,7 @@ start_headscale_first() {
 
     print_info "Descargando imágenes de Docker..."
     local compose_args=""
-    [[ "$ENABLE_SSL" == "true" ]] && compose_args="--profile ssl"
+    [[ "$RUN_CADDY" == "true" ]] && compose_args="--profile ssl"
     docker compose $compose_args pull
 
     print_info "Levantando Headscale..."
@@ -893,9 +1282,16 @@ deploy_stack() {
 
     # Determinar profile a usar
     local compose_args=""
-    if [[ "$ENABLE_SSL" == "true" ]]; then
+    if [[ "$RUN_CADDY" == "true" ]]; then
         compose_args="--profile ssl"
         print_info "Activando profile SSL..."
+    elif docker ps --filter "name=^caddy$" --format '{{.Names}}' 2>/dev/null | grep -q .; then
+        # Al reconfigurar de 'standalone' a un modo con proxy externo, Caddy
+        # sigue vivo de la instalación anterior: 'up -d' sin el profile no lo
+        # para, y seguiría ocupando los puertos 80/443.
+        print_info "Parando Caddy: este modo no lo usa..."
+        docker compose --profile ssl stop caddy >/dev/null 2>&1 || true
+        docker compose --profile ssl rm -f caddy >/dev/null 2>&1 || true
     fi
 
     # Levantar servicios
@@ -964,6 +1360,7 @@ show_access_info() {
 
     echo ""
     echo -e "${GREEN}${BOLD}✓ Headscale + Headplane están corriendo${NC}"
+    echo -e "${CYAN}Modo de despliegue:${NC} ${BOLD}${DEPLOY_MODE}${NC}"
     echo ""
 
     # URLs de acceso
@@ -971,7 +1368,37 @@ show_access_info() {
     echo -e "${CYAN}Control plane (Headscale):${NC} ${BOLD}${HEADSCALE_PUBLIC_URL}${NC}"
     echo ""
 
-    if [[ "$ENABLE_SSL" == "true" ]]; then
+    # En los modos con proxy externo el stack NO es alcanzable todavía: falta
+    # configurar la otra máquina. Decirlo antes que nada evita el desconcierto.
+    if [[ "$DEPLOY_MODE" == "proxy-single" || "$DEPLOY_MODE" == "proxy-split" ]]; then
+        echo -e "${YELLOW}${BOLD}┌─────────────────────────────────────────────────────────────────────────┐${NC}"
+        echo -e "${YELLOW}${BOLD}│  FALTA UN PASO: CONFIGURAR EL PROXY EXTERNO                             │${NC}"
+        echo -e "${YELLOW}${BOLD}└─────────────────────────────────────────────────────────────────────────┘${NC}"
+        echo ""
+        echo -e "   Las URLs de arriba todavía no responden. El stack escucha en:"
+        echo -e "     ${BOLD}${BACKEND_HOST}:${HEADSCALE_HTTP_PORT}${NC}  (control plane, HTTP)"
+        echo -e "     ${BOLD}${BACKEND_HOST}:${HEADPLANE_PORT}${NC}  (interfaz web, HTTP)"
+        echo ""
+        echo -e "   Configuración lista para copiar en la máquina del proxy:"
+        echo -e "     ${BOLD}reverse-proxy/REVERSE-PROXY.md${NC}   guía paso a paso para NPM"
+        echo -e "     ${BOLD}reverse-proxy/nginx-headscale.conf${NC}"
+        [[ "$DEPLOY_MODE" == "proxy-split" ]] && \
+        echo -e "     ${BOLD}reverse-proxy/nginx-headplane.conf${NC}"
+        echo ""
+        print_warning "Apunta AMBOS dominios al proxy, no a esta máquina."
+        print_warning "Abre UDP ${HEADSCALE_DERP_PORT} hacia ${BACKEND_HOST}: el relay DERP no pasa por el proxy."
+        echo ""
+    fi
+
+    # El aviso de TLS depende del modo, no de si Caddy arranca: con proxy
+    # externo hay HTTPS aunque aquí no corra ningún terminador TLS.
+    if [[ "$DEPLOY_MODE" == "plain" ]]; then
+        print_warning "El plano de control viaja sin cifrar (HTTP)"
+        echo -e "   No expongas estos puertos fuera de una red de confianza."
+        echo ""
+    fi
+
+    if [[ "$RUN_CADDY" == "true" ]]; then
         if [[ "$SSL_MODE" == "selfsigned" ]]; then
             print_warning "Estás usando un certificado autofirmado (CA interna de Caddy)"
             echo ""
@@ -994,9 +1421,6 @@ show_access_info() {
             fi
             echo ""
         fi
-    else
-        print_warning "El servicio está usando HTTP sin cifrado"
-        echo ""
     fi
 
     # --- API key: único método de acceso a la UI sin OIDC ---
@@ -1062,8 +1486,13 @@ show_access_info() {
     echo "• Configuración: .env"
     echo "• Config Headscale: headscale-config.yaml"
     echo "• Config Headplane: headplane-config.yaml"
-    if [[ "$ENABLE_SSL" == "true" ]]; then
+    if [[ "$RUN_CADDY" == "true" ]]; then
         echo "• Caddyfile: Caddyfile"
+    else
+        echo "• Override de puertos: docker-compose.override.yml"
+    fi
+    if [[ "$DEPLOY_MODE" == "proxy-single" || "$DEPLOY_MODE" == "proxy-split" ]]; then
+        echo "• Config del proxy externo: reverse-proxy/"
     fi
     echo "• Datos: $DATA_DIR/"
     echo ""
@@ -1131,8 +1560,10 @@ EOF
     fi
 
     # 3. Configuración interactiva
+    configure_deployment_mode
     configure_network
     configure_ports
+    configure_proxy_access
     compute_public_urls
     configure_tailnet
     configure_oidc
@@ -1147,6 +1578,7 @@ EOF
     generate_headplane_config
     generate_caddyfile
     generate_compose_override
+    generate_reverse_proxy_configs
 
     # 6. Desplegar
     echo ""
@@ -1164,7 +1596,7 @@ EOF
     else
         print_info "Configuración completada pero no desplegada"
         print_info "Para desplegar manualmente, ejecuta:"
-        if [[ "$ENABLE_SSL" == "true" ]]; then
+        if [[ "$RUN_CADDY" == "true" ]]; then
             echo -e "  ${YELLOW}docker compose --profile ssl up -d${NC}"
         else
             echo -e "  ${YELLOW}docker compose up -d${NC}"
