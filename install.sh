@@ -350,7 +350,7 @@ configure_network() {
     # Dominio o IP
     print_info "Ingresa el dominio o IP pública/privada para acceder al servicio"
     print_info "Ejemplos: vpn.midominio.com, 192.168.1.100, 10.0.0.5"
-    DOMAIN=$(ask_input "Dominio o IP" "${SERVER_URL:-vpn.example.com}" "validate_domain_or_ip")
+    DOMAIN=$(ask_input "Dominio o IP" "${DOMAIN:-vpn.example.com}" "validate_domain_or_ip")
 
     # SSL
     if ask_yes_no "¿Deseas habilitar SSL/TLS (HTTPS)?" "${ENABLE_SSL:-y}"; then
@@ -376,12 +376,11 @@ configure_network() {
             fi
         fi
 
-        # Configurar SERVER_URL con https
-        SERVER_URL="https://${DOMAIN}"
+        URL_SCHEME="https"
     else
         ENABLE_SSL="false"
         SSL_MODE="none"
-        SERVER_URL="http://${DOMAIN}"
+        URL_SCHEME="http"
 
         print_warning "ADVERTENCIA: El servicio se expondrá sin cifrado (HTTP plano)"
         print_warning "Esto NO es recomendable para entornos de producción expuestos a internet"
@@ -413,6 +412,33 @@ configure_ports() {
     print_success "Configuración de puertos completada"
 }
 
+compute_public_urls() {
+    # Las URLs públicas dependen del dominio Y de los puertos, por lo que sólo
+    # pueden calcularse después de configure_ports.
+    #
+    # Con proxy (SSL): Caddy sirve ambos servicios en el mismo dominio y puerto
+    #   estándar; el enrutado se hace por ruta (/admin -> Headplane, resto ->
+    #   Headscale). Ninguna URL lleva puerto.
+    #
+    # Sin proxy: cada servicio se expone en su propio puerto del host, por lo
+    #   que las URLs son distintas y DEBEN incluirlo.
+    if [[ "$ENABLE_SSL" == "true" ]]; then
+        local suffix=""
+        [[ "$HTTPS_PORT" != "443" ]] && suffix=":${HTTPS_PORT}"
+        HEADSCALE_PUBLIC_URL="${URL_SCHEME}://${DOMAIN}${suffix}"
+        HEADPLANE_PUBLIC_URL="${URL_SCHEME}://${DOMAIN}${suffix}"
+    else
+        HEADSCALE_PUBLIC_URL="${URL_SCHEME}://${DOMAIN}:${HEADSCALE_HTTP_PORT}"
+        HEADPLANE_PUBLIC_URL="${URL_SCHEME}://${DOMAIN}:${HEADPLANE_PORT}"
+    fi
+
+    # SERVER_URL = URL del control plane; es la que usan los clientes Tailscale
+    SERVER_URL="$HEADSCALE_PUBLIC_URL"
+
+    print_info "URL del control plane (Headscale): ${HEADSCALE_PUBLIC_URL}"
+    print_info "URL de la interfaz web (Headplane): ${HEADPLANE_PUBLIC_URL}/admin"
+}
+
 configure_tailnet() {
     print_header "CONFIGURACIÓN DE LA RED TAILNET"
 
@@ -420,6 +446,9 @@ configure_tailnet() {
 
     TAILNET_NAME=$(ask_input "Nombre de la organización/tailnet (alfanumérico, sin espacios)" \
                              "${TAILNET_NAME:-myorg}" "validate_alphanumeric")
+
+    ADMIN_USER=$(ask_input "Nombre del usuario administrador inicial" \
+                           "${ADMIN_USER:-admin}" "validate_alphanumeric")
 
     IP_PREFIXES_V4=$(ask_input "Rango IPv4 para clientes (CIDR)" "${IP_PREFIXES_V4:-100.64.0.0/10}")
     IP_PREFIXES_V6=$(ask_input "Rango IPv6 para clientes (CIDR)" "${IP_PREFIXES_V6:-fd7a:115c:a1e0::/48}")
@@ -496,7 +525,16 @@ generate_env_file() {
 # -----------------------------------------------------------------------------
 # RED Y ACCESO
 # -----------------------------------------------------------------------------
+DOMAIN=${DOMAIN}
+URL_SCHEME=${URL_SCHEME}
+
+# URL del control plane: la que usan los clientes con --login-server
 SERVER_URL=${SERVER_URL}
+HEADSCALE_PUBLIC_URL=${HEADSCALE_PUBLIC_URL}
+
+# URL pública de la interfaz web (la UI se sirve bajo /admin)
+HEADPLANE_PUBLIC_URL=${HEADPLANE_PUBLIC_URL}
+
 ENABLE_SSL=${ENABLE_SSL}
 SSL_MODE=${SSL_MODE}
 ACME_EMAIL=${ACME_EMAIL:-}
@@ -516,6 +554,17 @@ HEADSCALE_METRICS_PORT=${HEADSCALE_METRICS_PORT}
 # TAILNET
 # -----------------------------------------------------------------------------
 TAILNET_NAME=${TAILNET_NAME}
+
+# Usuario administrador creado automáticamente al desplegar
+ADMIN_USER=${ADMIN_USER}
+
+# Caducidad de la API key generada automáticamente (ej: 90d, 365d)
+APIKEY_EXPIRATION=${APIKEY_EXPIRATION:-90d}
+
+# API key de Headscale: credencial de acceso a Headplane. La rellena el
+# instalador tras arrancar Headscale. NO compartir ni versionar.
+HEADSCALE_API_KEY=${HEADSCALE_API_KEY:-}
+
 IP_PREFIXES_V4=${IP_PREFIXES_V4}
 IP_PREFIXES_V6=${IP_PREFIXES_V6}
 DATA_DIR=${DATA_DIR}
@@ -561,14 +610,24 @@ generate_headscale_config() {
 
     # Configurar OIDC si está habilitado
     if [[ "$ENABLE_OIDC" == "true" ]]; then
-        OIDC_CONFIG=$(cat <<'EOFC'
+        # OIDC_SCOPE es una lista separada por espacios ("openid profile email");
+        # Headscale la espera como lista YAML, un elemento por scope.
+        local scope_list=""
+        local s
+        for s in $OIDC_SCOPE; do
+            scope_list+="    - ${s}"$'\n'
+        done
+
+        # Heredoc SIN comillas: las variables deben expandirse aquí. envsubst
+        # hace una sola pasada y no volvería a sustituir el texto insertado.
+        OIDC_CONFIG=$(cat <<EOFC
 oidc:
   only_start_if_oidc_is_available: true
-  issuer: ${OIDC_ISSUER_URL}
-  client_id: ${OIDC_CLIENT_ID}
-  client_secret: ${OIDC_CLIENT_SECRET}
+  issuer: "${OIDC_ISSUER_URL}"
+  client_id: "${OIDC_CLIENT_ID}"
+  client_secret: "${OIDC_CLIENT_SECRET}"
   scope:
-    - ${OIDC_SCOPE}
+${scope_list%$'\n'}
   strip_email_domain: true
 EOFC
         )
@@ -611,21 +670,31 @@ EOFC
     # Headplane exige un booleano estricto; nunca dejar el valor vacío
     SESSION_SECURE=$([[ "$ENABLE_SSL" == "true" ]] && echo "true" || echo "false")
 
+    # La API key sólo existe tras arrancar Headscale. En la primera pasada se
+    # omite la clave; bootstrap_headscale regenera este fichero con ella.
+    if [[ -n "${HEADSCALE_API_KEY:-}" ]]; then
+        HEADSCALE_API_KEY_LINE="api_key: \"${HEADSCALE_API_KEY}\""
+    else
+        HEADSCALE_API_KEY_LINE="# api_key: pendiente de generar"
+    fi
+
     # Cargar plantilla y sustituir variables
     # Exportar todas las variables necesarias
     export COOKIE_SECRET
     export SESSION_SECURE
-    export SERVER_URL
+    export HEADPLANE_PUBLIC_URL
+    export HEADSCALE_PUBLIC_URL
     export HEADSCALE_HTTP_PORT
+    export HEADSCALE_API_KEY_LINE
     export OIDC_CONFIG_BLOCK
 
     # Usar envsubst sin lista de variables para que sustituya todas
     envsubst < "$TEMPLATES_DIR/headplane-config.yaml.tmpl" > "$SCRIPT_DIR/headplane-config.yaml"
 
     # Verificar que no ha quedado ningún campo obligatorio sin sustituir
-    if grep -qE '^\s*(cookie_secure|cookie_secret|base_url|url):\s*("")?\s*$' "$SCRIPT_DIR/headplane-config.yaml"; then
+    if grep -qE '^\s*(cookie_secure|cookie_secret|base_url|public_url|url):\s*("")?\s*$' "$SCRIPT_DIR/headplane-config.yaml"; then
         print_error "headplane-config.yaml tiene campos obligatorios vacíos tras la sustitución"
-        grep -nE '^\s*(cookie_secure|cookie_secret|base_url|url):\s*("")?\s*$' "$SCRIPT_DIR/headplane-config.yaml"
+        grep -nE '^\s*(cookie_secure|cookie_secret|base_url|public_url|url):\s*("")?\s*$' "$SCRIPT_DIR/headplane-config.yaml"
         exit 1
     fi
 
@@ -711,13 +780,108 @@ create_data_dirs() {
 # FUNCIONES DE DESPLIEGUE
 # -----------------------------------------------------------------------------
 
+start_headscale_first() {
+    # Headscale debe estar arriba ANTES que Headplane: la API key que Headplane
+    # necesita sólo puede emitirla un Headscale en marcha.
+    print_header "ARRANCANDO HEADSCALE"
+
+    print_info "Descargando imágenes de Docker..."
+    local compose_args=""
+    [[ "$ENABLE_SSL" == "true" ]] && compose_args="--profile ssl"
+    docker compose $compose_args pull
+
+    print_info "Levantando Headscale..."
+    docker compose up -d headscale
+
+    print_info "Esperando a que Headscale esté saludable..."
+    local waited=0
+    while [ $waited -lt 90 ]; do
+        local state
+        state=$(docker inspect -f '{{.State.Health.Status}}' headscale 2>/dev/null || echo "starting")
+        if [[ "$state" == "healthy" ]]; then
+            echo ""
+            print_success "Headscale está listo"
+            return 0
+        fi
+        sleep 2
+        waited=$((waited + 2))
+        echo -n "."
+    done
+
+    echo ""
+    print_error "Headscale no llegó a estado saludable tras 90s"
+    print_info "Revisa los logs con: docker compose logs headscale"
+    exit 1
+}
+
+bootstrap_headscale() {
+    print_header "CREANDO USUARIO ADMINISTRADOR Y API KEY"
+
+    # --- Usuario administrador (idempotente) ---
+    # 'users create' falla con UNIQUE constraint si ya existe, así que se
+    # comprueba antes para que reejecutar el instalador no aborte.
+    if docker exec headscale headscale users list --output json 2>/dev/null \
+        | grep -q "\"name\": *\"${ADMIN_USER}\""; then
+        print_info "El usuario '${ADMIN_USER}' ya existe, se conserva"
+    else
+        if docker exec headscale headscale users create "${ADMIN_USER}" >/dev/null 2>&1; then
+            print_success "Usuario administrador creado: ${ADMIN_USER}"
+        else
+            print_error "No se pudo crear el usuario '${ADMIN_USER}'"
+            docker exec headscale headscale users create "${ADMIN_USER}" || true
+            exit 1
+        fi
+    fi
+
+    # --- API key ---
+    # Headscale sólo devuelve el valor completo al crearla; después almacena
+    # únicamente el prefijo. Si conservamos una en .env y sigue vigente, se
+    # reutiliza para que reconfigurar no acumule claves huérfanas.
+    if [[ -n "${HEADSCALE_API_KEY:-}" ]]; then
+        local prefix expires now
+        prefix=$(printf '%s' "$HEADSCALE_API_KEY" | cut -d- -f1-3)
+
+        # Headscale lista el prefijo enmascarado ("hskey-api-XXXX-***"), por lo
+        # que hay que buscar el prefijo como subcadena, no como valor exacto.
+        expires=$(docker exec headscale headscale apikeys list --output json 2>/dev/null \
+                  | tr -d ' \t\n' \
+                  | grep -oE "\"prefix\":\"${prefix}[^\"]*\",\"expiration\":\{\"seconds\":[0-9]+" \
+                  | grep -oE '[0-9]+$' || true)
+        now=$(date +%s)
+
+        if [[ -n "$expires" ]] && [[ "$expires" -gt "$now" ]]; then
+            print_info "Reutilizando la API key existente de .env"
+            return 0
+        elif [[ -n "$expires" ]]; then
+            print_warning "La API key guardada en .env ha caducado, se generará otra"
+        else
+            print_warning "La API key guardada en .env ya no existe, se generará otra"
+        fi
+    fi
+
+    HEADSCALE_API_KEY=$(docker exec headscale headscale apikeys create \
+                        --expiration "${APIKEY_EXPIRATION:-90d}" 2>/dev/null | tr -d '\r\n')
+
+    if [[ ! "$HEADSCALE_API_KEY" =~ ^hskey- ]]; then
+        print_error "La API key generada no tiene el formato esperado"
+        print_info "Genérala manualmente con: docker exec headscale headscale apikeys create"
+        HEADSCALE_API_KEY=""
+        return 0
+    fi
+
+    # Persistir en .env (único fichero con secretos, ya excluido por .gitignore)
+    if grep -q '^HEADSCALE_API_KEY=' "$ENV_FILE"; then
+        sed -i "s|^HEADSCALE_API_KEY=.*|HEADSCALE_API_KEY=${HEADSCALE_API_KEY}|" "$ENV_FILE"
+    else
+        printf '\n# API key de Headscale (generada automáticamente, NO compartir)\nHEADSCALE_API_KEY=%s\n' \
+            "$HEADSCALE_API_KEY" >> "$ENV_FILE"
+    fi
+
+    print_success "API key generada (válida ${APIKEY_EXPIRATION:-90d}) y guardada en .env"
+}
+
 deploy_stack() {
     print_header "DESPLEGANDO STACK CON DOCKER COMPOSE"
-
-    # Cargar .env
-    set -a
-    source "$ENV_FILE"
-    set +a
 
     # Determinar profile a usar
     local compose_args=""
@@ -725,10 +889,6 @@ deploy_stack() {
         compose_args="--profile ssl"
         print_info "Activando profile SSL..."
     fi
-
-    # Pull de imágenes
-    print_info "Descargando imágenes de Docker..."
-    docker compose $compose_args pull
 
     # Levantar servicios
     print_info "Levantando servicios..."
@@ -765,36 +925,54 @@ show_access_info() {
     echo -e "${GREEN}${BOLD}✓ Headscale + Headplane están corriendo${NC}"
     echo ""
 
-    # URL de acceso
-    if [[ "$ENABLE_SSL" == "true" ]]; then
-        echo -e "${CYAN}URL de acceso:${NC} ${BOLD}${SERVER_URL}/admin${NC}"
+    # URLs de acceso
+    echo -e "${CYAN}Interfaz web (Headplane):${NC} ${BOLD}${HEADPLANE_PUBLIC_URL}/admin${NC}"
+    echo -e "${CYAN}Control plane (Headscale):${NC} ${BOLD}${HEADSCALE_PUBLIC_URL}${NC}"
+    echo ""
 
+    if [[ "$ENABLE_SSL" == "true" ]]; then
         if [[ "$SSL_MODE" == "selfsigned" ]]; then
-            echo ""
             print_warning "Estás usando un certificado autofirmado"
             print_warning "Tu navegador mostrará una advertencia de seguridad"
             print_warning "Esto es normal, puedes proceder de forma segura en una red privada"
+            echo ""
         fi
     else
-        echo -e "${CYAN}URL de acceso:${NC} ${BOLD}http://${DOMAIN}:${HEADPLANE_PORT}/admin${NC}"
-        echo ""
         print_warning "El servicio está usando HTTP sin cifrado"
+        echo ""
     fi
 
-    echo ""
+    # --- API key: único método de acceso a la UI sin OIDC ---
+    if [[ -n "${HEADSCALE_API_KEY:-}" ]]; then
+        echo -e "${YELLOW}${BOLD}┌─────────────────────────────────────────────────────────────────────────┐${NC}"
+        echo -e "${YELLOW}${BOLD}│  API KEY PARA INICIAR SESIÓN EN HEADPLANE                               │${NC}"
+        echo -e "${YELLOW}${BOLD}└─────────────────────────────────────────────────────────────────────────┘${NC}"
+        echo ""
+        echo -e "  ${BOLD}${HEADSCALE_API_KEY}${NC}"
+        echo ""
+        print_warning "GUÁRDALA AHORA: Headscale sólo la muestra en el momento de crearla."
+        print_warning "Da control total sobre tu tailnet. Trátala como una contraseña."
+        echo ""
+        echo -e "  Si la pierdes, genera otra con:"
+        echo -e "  ${YELLOW}docker exec headscale headscale apikeys create --expiration 90d${NC}"
+        echo ""
+    else
+        print_warning "No se generó ninguna API key en esta ejecución"
+        echo -e "  Para entrar en Headplane necesitas una:"
+        echo -e "  ${YELLOW}docker exec headscale headscale apikeys create --expiration 90d${NC}"
+        echo ""
+    fi
+
     echo -e "${CYAN}${BOLD}Próximos pasos:${NC}"
     echo ""
-    echo "1. Crear un usuario administrador en Headscale:"
-    echo -e "   ${YELLOW}docker exec headscale headscale users create admin${NC}"
+    echo -e "1. Entra en ${BOLD}${HEADPLANE_PUBLIC_URL}/admin${NC} y pega la API key de arriba"
+    echo -e "   ${YELLOW}(la UI vive bajo /admin; la raíz / devuelve 404)${NC}"
     echo ""
     echo "2. Generar una clave de pre-autenticación para conectar dispositivos:"
-    echo -e "   ${YELLOW}docker exec headscale headscale preauthkeys create --user admin --reusable --expiration 24h${NC}"
+    echo -e "   ${YELLOW}docker exec headscale headscale preauthkeys create --user ${ADMIN_USER} --reusable --expiration 24h${NC}"
     echo ""
     echo "3. Conectar un dispositivo con Tailscale:"
-    echo -e "   ${YELLOW}tailscale up --login-server=${SERVER_URL} --authkey=<tu-clave>${NC}"
-    echo ""
-    echo -e "4. Acceder a la UI web de Headplane en: ${BOLD}${SERVER_URL}/admin${NC}"
-    echo -e "   ${YELLOW}(Headplane sirve la interfaz bajo /admin; la raíz / devuelve 404)${NC}"
+    echo -e "   ${YELLOW}tailscale up --login-server=${HEADSCALE_PUBLIC_URL} --authkey=<tu-clave>${NC}"
     echo ""
 
     echo -e "${CYAN}${BOLD}Comandos útiles:${NC}"
@@ -891,6 +1069,7 @@ EOF
     # 3. Configuración interactiva
     configure_network
     configure_ports
+    compute_public_urls
     configure_tailnet
     configure_oidc
 
@@ -908,6 +1087,14 @@ EOF
     # 6. Desplegar
     echo ""
     if ask_yes_no "¿Deseas desplegar el stack ahora?" "y"; then
+        # Fase 1: sólo Headscale, para poder emitir la API key
+        start_headscale_first
+        bootstrap_headscale
+
+        # Regenerar la config de Headplane ya con la API key inyectada
+        generate_headplane_config
+
+        # Fase 2: resto del stack (Headplane y, si procede, Caddy)
         deploy_stack
         show_access_info
     else

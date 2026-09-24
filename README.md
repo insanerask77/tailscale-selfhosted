@@ -204,18 +204,17 @@ Ver [.env.example](.env.example) para la lista completa de variables.
 
 ### Primeros Pasos
 
-1. **Acceder a la UI web**:
+El instalador ya crea el **usuario administrador** y la **API key**, y muestra
+esta última por pantalla al terminar. Guárdala: Headscale sólo la revela en el
+momento de crearla.
+
+1. **Acceder a la UI web** y pegar la API key en el formulario de login:
    ```
    Abre en tu navegador: https://vpn.midominio.com/admin
    ```
    > Headplane sirve la interfaz bajo `/admin`; la raíz (`/`) devuelve 404.
 
-2. **Crear un usuario administrador**:
-   ```bash
-   docker exec headscale headscale users create admin
-   ```
-
-3. **Generar una clave de pre-autenticación**:
+2. **Generar una clave de pre-autenticación**:
    ```bash
    docker exec headscale headscale preauthkeys create \
      --user admin \
@@ -223,11 +222,45 @@ Ver [.env.example](.env.example) para la lista completa de variables.
      --expiration 24h
    ```
 
-4. **Conectar un dispositivo**:
+3. **Conectar un dispositivo**:
    ```bash
    # En tu dispositivo con Tailscale instalado
    tailscale up --login-server=https://vpn.midominio.com --authkey=<tu-clave>
    ```
+
+### Dos URLs distintas: control plane e interfaz web
+
+Headscale y Headplane son servicios separados y **no comparten URL**:
+
+| | Control plane (Headscale) | Interfaz web (Headplane) |
+|---|---|---|
+| **Con proxy** (`ENABLE_SSL=true`) | `https://vpn.midominio.com` | `https://vpn.midominio.com/admin` |
+| **Sin proxy** (`ENABLE_SSL=false`) | `http://vpn.midominio.com:8080` | `http://vpn.midominio.com:3000/admin` |
+
+La primera es la que va en `--login-server`. Con proxy, Caddy las sirve en el
+mismo dominio y enruta por ruta: `/admin*` va a Headplane y **todo lo demás** a
+Headscale, porque los clientes Tailscale usan la raíz del dominio (`/key`,
+`/ts2021`, `/machine/*`, `/derp`, `/bootstrap-dns`…).
+
+Sin proxy cada servicio se expone en su propio puerto, así que las URLs
+**incluyen el puerto y son diferentes**. Ambas quedan guardadas en `.env` como
+`HEADSCALE_PUBLIC_URL` y `HEADPLANE_PUBLIC_URL`.
+
+### API key de Headplane
+
+Sin OIDC, la única credencial para entrar en la UI es una API key de Headscale
+(no hay usuario/contraseña propios). El instalador genera una y la guarda en
+`.env`; si la pierdes:
+
+```bash
+docker exec headscale headscale apikeys create --expiration 90d
+docker exec headscale headscale apikeys list
+docker exec headscale headscale apikeys expire --prefix <prefijo>
+```
+
+> ⚠️ Da control total sobre el tailnet. Trátala como una contraseña de
+> administrador y ten en cuenta que caduca (90 días por defecto,
+> configurable con `APIKEY_EXPIRATION`).
 
 ### Gestión de Usuarios
 

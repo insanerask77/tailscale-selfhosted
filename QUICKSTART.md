@@ -39,11 +39,18 @@ Próximos pasos:
 
 ## 📝 Primeros Pasos
 
-### 1. Crear Usuario Administrador
+### 1. Entrar en la UI Web
 
-```bash
-docker exec headscale headscale users create admin
+El instalador ya ha creado el usuario administrador y una **API key**, que
+muestra por pantalla al terminar. Ábre la UI y pega esa key en el login:
+
 ```
+https://vpn.midominio.com/admin          # con proxy (SSL)
+http://vpn.midominio.com:3000/admin      # sin proxy
+```
+
+> Headplane sirve la interfaz bajo la ruta `/admin`. La raíz (`/`) devuelve 404.
+> Sin OIDC, la API key es la única credencial: no hay usuario/contraseña.
 
 ### 2. Generar Clave de Conexión
 
@@ -61,18 +68,15 @@ Copia la clave que se muestra (algo como `1a2b3c4d...`).
 En tu ordenador/móvil con [Tailscale instalado](https://tailscale.com/download):
 
 ```bash
+# Con proxy (SSL): el control plane vive en la raíz del dominio
 tailscale up --login-server=https://vpn.midominio.com --authkey=<tu-clave>
+
+# Sin proxy: hay que indicar el puerto de Headscale
+tailscale up --login-server=http://vpn.midominio.com:8080 --authkey=<tu-clave>
 ```
 
-### 4. Acceder a la UI Web
-
-Abre en tu navegador:
-
-```
-https://vpn.midominio.com/admin
-```
-
-> Headplane sirve la interfaz bajo la ruta `/admin`. La raíz (`/`) devuelve 404.
+> La URL exacta la muestra el instalador al terminar, y está en `.env` como
+> `HEADSCALE_PUBLIC_URL`. **No es la misma** que la de la interfaz web.
 
 ---
 

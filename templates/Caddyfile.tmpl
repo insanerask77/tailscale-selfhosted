@@ -32,28 +32,28 @@ ${CADDY_DOMAIN} {
         -Server
     }
 
-    # Reverse proxy a Headplane
-    reverse_proxy headplane:3000 {
-        # Health check
-        health_uri /health
-        health_interval 10s
-        health_timeout 5s
-
-        # Headers para WebSocket y SSE (si Headplane los usa)
-        header_up X-Real-IP {remote_host}
-        header_up X-Forwarded-For {remote_host}
-        header_up X-Forwarded-Proto {scheme}
-        header_up X-Forwarded-Host {host}
-    }
-
-    # Proxy directo a Headscale API (opcional, para clientes que lo necesiten)
-    handle /api/* {
-        reverse_proxy headscale:${HEADSCALE_HTTP_PORT}
-    }
-
     # Health check endpoint para monitoreo externo
     handle /healthz {
         respond "OK" 200
+    }
+
+    # Interfaz web de Headplane: sirve ÚNICAMENTE bajo /admin
+    handle /admin* {
+        reverse_proxy headplane:3000 {
+            # Caddy ya envía X-Forwarded-{For,Proto,Host} por defecto
+            header_up X-Real-IP {remote_host}
+        }
+    }
+
+    # Todo lo demás pertenece a Headscale. Los clientes Tailscale usan la raíz
+    # del dominio (/key, /ts2021, /machine/*, /derp, /bootstrap-dns, /windows,
+    # /apple, /oidc/*, /api/*...), así que el control plane debe ser el destino
+    # por defecto; enrutar sólo /api/* aquí dejaría la VPN inoperativa.
+    handle {
+        reverse_proxy headscale:${HEADSCALE_HTTP_PORT} {
+            # Caddy ya envía X-Forwarded-{For,Proto,Host} por defecto
+            header_up X-Real-IP {remote_host}
+        }
     }
 }
 

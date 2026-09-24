@@ -121,6 +121,32 @@ cmd_preauthkey_create() {
     print_success "Clave generada"
 }
 
+cmd_apikey_create() {
+    local expiration="${1:-90d}"
+
+    print_info "Generando API key de Headscale (válida $expiration)..."
+
+    local key
+    key=$(docker exec headscale headscale apikeys create --expiration "$expiration" | tr -d '\r\n')
+
+    if [[ ! "$key" =~ ^hskey- ]]; then
+        print_error "No se pudo generar la API key"
+        return 1
+    fi
+
+    echo ""
+    echo -e "  ${BOLD}${key}${NC}"
+    echo ""
+    print_warning "Guárdala ahora: Headscale sólo la muestra al crearla"
+    print_info "Úsala para iniciar sesión en Headplane (/admin)"
+}
+
+cmd_apikey_list() {
+    print_info "API keys de Headscale:"
+    echo ""
+    docker exec headscale headscale apikeys list
+}
+
 cmd_routes_list() {
     print_info "Listando rutas:"
     docker exec headscale headscale routes list
@@ -278,6 +304,11 @@ ${CYAN}Gestión de Headscale:${NC}
                               utils.sh preauth:create admin
                               utils.sh preauth:create admin true 7d
 
+  apikey:create [expiration]
+                          - Crear API key para iniciar sesión en Headplane
+                            (default: 90d)
+  apikey:list             - Listar API keys (sólo muestra prefijos)
+
 ${CYAN}Utilidades:${NC}
   backup [directorio]      - Crear backup (default: ./backups)
   config:show              - Mostrar configuración actual (.env)
@@ -335,6 +366,12 @@ main() {
             ;;
         preauth:create)
             cmd_preauthkey_create "$@"
+            ;;
+        apikey:create)
+            cmd_apikey_create "$@"
+            ;;
+        apikey:list)
+            cmd_apikey_list "$@"
             ;;
         backup)
             cmd_backup "$@"
