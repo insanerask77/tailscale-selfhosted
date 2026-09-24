@@ -206,8 +206,9 @@ Ver [.env.example](.env.example) para la lista completa de variables.
 
 1. **Acceder a la UI web**:
    ```
-   Abre en tu navegador: https://vpn.midominio.com
+   Abre en tu navegador: https://vpn.midominio.com/admin
    ```
+   > Headplane sirve la interfaz bajo `/admin`; la raíz (`/`) devuelve 404.
 
 2. **Crear un usuario administrador**:
    ```bash

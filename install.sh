@@ -481,6 +481,11 @@ generate_secrets() {
 generate_env_file() {
     print_header "GENERANDO ARCHIVO .env"
 
+    # Variables derivadas: deben existir como variables de shell (no solo en el
+    # heredoc) porque las plantillas se rellenan con envsubst más adelante.
+    AUTH_TYPE=$([[ "$ENABLE_OIDC" == "true" ]] && echo "oidc" || echo "local")
+    SESSION_SECURE=$([[ "$ENABLE_SSL" == "true" ]] && echo "true" || echo "false")
+
     cat > "$ENV_FILE" <<EOF
 # =============================================================================
 # CONFIGURACIÓN HEADSCALE + HEADPLANE
@@ -533,10 +538,10 @@ OIDC_SCOPE="${OIDC_SCOPE}"
 OIDC_EMAIL_CLAIM="${OIDC_EMAIL_CLAIM}"
 
 # Auth type (generado automáticamente)
-AUTH_TYPE=$([ "$ENABLE_OIDC" == "true" ] && echo "oidc" || echo "local")
+AUTH_TYPE=${AUTH_TYPE}
 
 # Session secure (generado automáticamente)
-SESSION_SECURE=$([ "$ENABLE_SSL" == "true" ] && echo "true" || echo "false")
+SESSION_SECURE=${SESSION_SECURE}
 
 # -----------------------------------------------------------------------------
 # AVANZADO
@@ -603,6 +608,9 @@ EOFC
         OIDC_CONFIG_BLOCK="# OIDC disabled"
     fi
 
+    # Headplane exige un booleano estricto; nunca dejar el valor vacío
+    SESSION_SECURE=$([[ "$ENABLE_SSL" == "true" ]] && echo "true" || echo "false")
+
     # Cargar plantilla y sustituir variables
     # Exportar todas las variables necesarias
     export COOKIE_SECRET
@@ -613,6 +621,13 @@ EOFC
 
     # Usar envsubst sin lista de variables para que sustituya todas
     envsubst < "$TEMPLATES_DIR/headplane-config.yaml.tmpl" > "$SCRIPT_DIR/headplane-config.yaml"
+
+    # Verificar que no ha quedado ningún campo obligatorio sin sustituir
+    if grep -qE '^\s*(cookie_secure|cookie_secret|base_url|url):\s*("")?\s*$' "$SCRIPT_DIR/headplane-config.yaml"; then
+        print_error "headplane-config.yaml tiene campos obligatorios vacíos tras la sustitución"
+        grep -nE '^\s*(cookie_secure|cookie_secret|base_url|url):\s*("")?\s*$' "$SCRIPT_DIR/headplane-config.yaml"
+        exit 1
+    fi
 
     print_success "Configuración de Headplane generada: headplane-config.yaml"
 }
@@ -752,7 +767,7 @@ show_access_info() {
 
     # URL de acceso
     if [[ "$ENABLE_SSL" == "true" ]]; then
-        echo -e "${CYAN}URL de acceso:${NC} ${BOLD}${SERVER_URL}${NC}"
+        echo -e "${CYAN}URL de acceso:${NC} ${BOLD}${SERVER_URL}/admin${NC}"
 
         if [[ "$SSL_MODE" == "selfsigned" ]]; then
             echo ""
@@ -761,7 +776,7 @@ show_access_info() {
             print_warning "Esto es normal, puedes proceder de forma segura en una red privada"
         fi
     else
-        echo -e "${CYAN}URL de acceso:${NC} ${BOLD}http://${DOMAIN}:${HEADPLANE_PORT}${NC}"
+        echo -e "${CYAN}URL de acceso:${NC} ${BOLD}http://${DOMAIN}:${HEADPLANE_PORT}/admin${NC}"
         echo ""
         print_warning "El servicio está usando HTTP sin cifrado"
     fi
@@ -778,7 +793,8 @@ show_access_info() {
     echo "3. Conectar un dispositivo con Tailscale:"
     echo -e "   ${YELLOW}tailscale up --login-server=${SERVER_URL} --authkey=<tu-clave>${NC}"
     echo ""
-    echo "4. Acceder a la UI web de Headplane en: ${BOLD}${SERVER_URL}${NC}"
+    echo -e "4. Acceder a la UI web de Headplane en: ${BOLD}${SERVER_URL}/admin${NC}"
+    echo -e "   ${YELLOW}(Headplane sirve la interfaz bajo /admin; la raíz / devuelve 404)${NC}"
     echo ""
 
     echo -e "${CYAN}${BOLD}Comandos útiles:${NC}"

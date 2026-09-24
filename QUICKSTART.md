@@ -69,8 +69,10 @@ tailscale up --login-server=https://vpn.midominio.com --authkey=<tu-clave>
 Abre en tu navegador:
 
 ```
-https://vpn.midominio.com
+https://vpn.midominio.com/admin
 ```
+
+> Headplane sirve la interfaz bajo la ruta `/admin`. La raíz (`/`) devuelve 404.
 
 ---
 

@@ -14,8 +14,8 @@ Caddyfile
 # Logs
 *.log
 
-# Docker
-docker-compose.override.yml  # Generado automáticamente por install.sh
+# Docker (generado automáticamente por install.sh)
+docker-compose.override.yml
 
 # Backup files
 *.bak
